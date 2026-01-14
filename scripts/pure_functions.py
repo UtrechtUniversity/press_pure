@@ -1,26 +1,37 @@
-#!/usr/bin/env python3
+
 """Utilities for interacting with the Pure API and resolving press clipping data."""
-from rapidfuzz import fuzz
+
+import logging
+import configparser
+import unicodedata
+import json
+import requests
+import html
+
+from urllib.parse import urlparse, parse_qs, quote_plus, unquote
+from concurrent.futures import ThreadPoolExecutor
+from bs4 import BeautifulSoup
 from datetime import datetime
 from typing import List, Tuple, Dict, Any
-import configparser
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import requests
-import logging
-import requests
-from urllib.parse import quote_plus, urlparse, parse_qs
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
 
 # Load configuration
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
 CONFIG.read(CONFIG_PATH)
 API_KEY = CONFIG["CREDENTIALS"]["APIKEY_CRUD"]
+API_KEY_OLD = CONFIG["CREDENTIALS"]["APIKEY"]
 GOOGLE_API = CONFIG["CREDENTIALS"]["GOOGLE_API"]
 GOOGLE_CX = CONFIG["CREDENTIALS"]["GOOGLE_CX"]
 BASEURL = CONFIG["CREDENTIALS"]["BASEURL"]
+BASEURL_CRUD = CONFIG['CREDENTIALS']['BASEURL_CRUD']
+APIKEY_CRUD = CONFIG['CREDENTIALS']['APIKEY_CRUD']
+WORKFLOW_STATUS = dict(CONFIG["WORKFLOW STATUS"])
+WORKFLOW_STATUS = {k.upper(): v for k, v in CONFIG["WORKFLOW STATUS"].items()}
+
 # Session setup with retries
 SESSION = requests.Session()
 retry_strategy = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
@@ -30,41 +41,40 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 }
-
-
-import logging
-import requests
-from urllib.parse import quote_plus, urlparse, parse_qs
-from concurrent.futures import ThreadPoolExecutor
-
-# HTTP session and headers
 SESSION = requests.Session()
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
-FALLBACK_ORG_UUID = 'cdd6493c-70ab-40f8-8246-b8be95f27e71'
-# Known source mappings
-import requests
-import logging
-from urllib.parse import urlparse, parse_qs, quote_plus, unquote
-from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup
 
-SOURCE_MAP = {
-    "fd.nl": "https://fd.nl",
-    "volkskrant.nl": "https://www.volkskrant.nl",
-    "ad.nl": "https://www.ad.nl",
-    "tech daily news": "https://www.techdailynews.com",
-    "nature geoscience": "https://www.nature.com/ngeo",
-    "ncbi": "https://www.ncbi.nlm.nih.gov",
-    "open universiteit": "https://www.ou.nl",
-    "nscr": "https://nscr.nl",
-    "movisie.nl": "https://www.movisie.nl",
-    "university world news": "https://www.universityworldnews.com",
-    "annekeschrijft.com": "https://annekeschrijft.com",
-    "po-raad.nl": "https://www.poraad.nl",
-    # Add other known mappings as needed
-}
+
+SOURCE_MAP = dict(CONFIG.items("SOURCE_MAP"))
+
+
+def make_free_keywords_group(keywords: list[str]) -> dict:
+    return {
+        "typeDiscriminator": "FreeKeywordsKeywordGroup",
+        "logicalName": "keywordContainers",
+        "name": {"en_GB": "Keywords"},
+        "keywords": [{
+            "locale": "en_GB",
+            "freeKeywords": keywords
+        }]
+    }
+
+def escape_pure_text(text, wrap_paragraph=False):
+    """Escapes &, <, > for XHTML and normalizes for consistent comparison of titles."""
+    if not isinstance(text, str):
+        return text
+
+    # Unescape to prevent double encoding
+    text = html.unescape(text.strip())
+
+    # Normalize unicode and make comparison case-insensitive
+    text = unicodedata.normalize("NFKC", text).casefold()
+    escaped = html.escape(text)
+
+    return f"<p>{escaped}</p>" if wrap_paragraph else escaped
+
+
+
+
 
 def resolve_lexisnexis_url(url, title, session, headers):
     """Resolve a LexisNexis URL to its final destination, rejecting LexisNexis results."""
@@ -73,12 +83,12 @@ def resolve_lexisnexis_url(url, title, session, headers):
         response = session.get(url, headers=headers, allow_redirects=True, timeout=10)
         final_url = response.url
         if response.ok and not ("lexisnexis.com" in final_url.lower() or "#content" in final_url):
-            logging.info(f"Direct resolution succeeded for '{title}': {final_url}")
+            logging.debug(f"Direct resolution succeeded for '{title}': {final_url}")
             return final_url
         else:
-            logging.warning(f"Direct resolution invalid or LexisNexis domain for '{title}': {final_url}")
+            logging.debug(f"Direct resolution invalid or LexisNexis domain for '{title}': {final_url}")
     except requests.RequestException as e:
-        logging.warning(f"Direct resolution failed for '{title}': {e}")
+        logging.debug(f"Direct resolution failed for '{title}': {e}")
 
     parsed_url = urlparse(url)
     params = parse_qs(parsed_url.query)
@@ -91,7 +101,7 @@ def resolve_lexisnexis_url(url, title, session, headers):
             try:
                 head_resp = session.head(guessed_url, headers=headers, allow_redirects=True, timeout=5)
                 if head_resp.ok:
-                    logging.info(f"Successfully guessed URL for '{title}': {guessed_url}")
+                    logging.debug(f"Successfully guessed URL for '{title}': {guessed_url}")
                     return guessed_url
             except requests.RequestException:
                 continue
@@ -114,10 +124,10 @@ def search_duckduckgo(title, session):
             if 'uddg' in qs:
                 url = unquote(qs['uddg'][0])
                 if "lexisnexis.com" not in url.lower():
-                    logging.info(f"DuckDuckGo found URL for '{title}': {url}")
+                    logging.debug(f"DuckDuckGo found URL for '{title}': {url}")
                     return url
     except requests.RequestException as e:
-        logging.warning(f"DuckDuckGo search failed for '{title}': {e}")
+        logging.debug(f"DuckDuckGo search failed for '{title}': {e}")
 
     return None
 
@@ -131,7 +141,8 @@ def multi_engine_resolve(url, title, session, headers):
         return ddg_result
 
     fallback_url = f"https://www.google.com/search?q={quote_plus(title)}"
-    logging.info(f"Fallback Google search for '{title}': {fallback_url}")
+    # fallback_url = f""
+    logging.debug(f"Fallback Google search for '{title}': {fallback_url}")
     return fallback_url
 
 def batch_resolve_urls(articles, session, headers, max_workers=10):
@@ -153,76 +164,83 @@ def batch_resolve_urls(articles, session, headers, max_workers=10):
                 article["URL"] = resolved_url
             except Exception as e:
                 article["URL"] = f"https://www.google.com/search?q={quote_plus(article['Media item title'])}"
-                logging.error(f"Error resolving '{article['Media item title']}': {e}")
+                # article["URL"] = f""
+                logging.debug(f"Error resolving '{article['Media item title']}': {e}")
 
     logging.info("Batch URL resolution complete.")
 
 
 
-def find_person(name: str, date: datetime, threshold: int = 95) -> Tuple[str | None, List[Dict[str, str]], str]:
-    url = "https://staging.research-portal.uu.nl/ws/api/persons/search/"
-    payload = {"searchString": name}
-    headers = {"Content-Type": "application/json", "accept": "application/json", "api-key": API_KEY}
+from typing import Optional, Tuple, List, Dict
+from rapidfuzz import fuzz
+import logging
 
-    response = SESSION.post(url, json=payload, headers=headers)
-    if response.status_code != 200:
-        logging.warning(f"API request failed for '{name}': {response.status_code}")
-        return None, [], ""
+def find_person(name: str, date: datetime, threshold: int = 95) -> Tuple[Optional[str], Optional[str], List[Dict[str, str]], str]:
+    """Zoekt een persoon in Pure en geeft (employee_id, uuid, affiliaties, org_name) terug."""
+
+    url = f"{BASEURL_CRUD}persons/search"
+    payload = {"searchString": name}
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "api-key": API_KEY
+    }
+
+    try:
+        response = SESSION.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logging.debug(f"API request failed for '{name}': {e}")
+        return None, None, [], ""
 
     data = response.json()
-    if not data.get("items"):
-        logging.info(f"No persons found for '{name}'")
-        return None, [], ""
+    items = data.get("items", [])
+    if not items:
+        logging.debug(f"No persons found for '{name}'")
+        return None, None, [], ""
 
-    best_match = None
-    best_score = 0
-    best_name = ""
+    best_match, best_score, best_name = None, 0, ""
 
-    for item in data["items"]:
-        # Extract all possible names
+    for item in items:
         possible_names = set()
 
-        # Primary name
         full_name = f"{item['name'].get('firstName', '')} {item['name'].get('lastName', '')}".strip()
         if full_name:
             possible_names.add(full_name)
 
-        # Alternative names (e.g., "Known as name")
-        for name_entry in item.get("names", []):
-            alt_name = f"{name_entry['name'].get('firstName', '')} {name_entry['name'].get('lastName', '')}".strip()
+        for alt in item.get("names", []):
+            alt_name = f"{alt['name'].get('firstName', '')} {alt['name'].get('lastName', '')}".strip()
             if alt_name:
                 possible_names.add(alt_name)
 
-        # Compare each possible name
-        for candidate_name in possible_names:
-            similarity = fuzz.ratio(name.lower(), candidate_name.lower())
-            logging.debug(f"Comparing '{name}' with '{candidate_name}' - Similarity: {similarity}%")
+        for candidate in possible_names:
+            score = fuzz.ratio(name.lower(), candidate.lower())
+            logging.debug(f"Comparing '{name}' ↔ '{candidate}' = {score}%")
+            print(f"Comparing '{name}' ↔ '{candidate}' = {score}%")
+            if score > best_score:
+                best_match, best_score, best_name = item, score, candidate
 
-            if similarity > best_score:
-                best_match = item
-                best_score = similarity
-                best_name = candidate_name
-
-    if best_match is None or best_score < threshold:
-        logging.info(f"Best match for '{name}' is '{best_name}' with {best_score}% similarity (below threshold).")
-        return None, [], ""
-
-    if best_score == 100:
-        logging.info(f"Exact match found for '{name}' -> '{best_name}'")
-    elif best_score >= threshold:
-        logging.info(f"Match above threshold ({threshold}%) for '{name}' -> '{best_name}' ({best_score}%)")
+    if not best_match or best_score < threshold:
+        logging.debug(f"No good match for '{name}' (best: '{best_name}' at {best_score}%)")
+        return None, None, [], ""
 
     employee_id = None
+    uuid = None
     for id_entry in best_match.get("identifiers", []):
         id_type = id_entry.get("type", {}).get("term", {}).get("en_GB", "")
         if id_type == "Employee ID":
             employee_id = id_entry.get("id")
+            uuid = best_match.get("uuid")
             break
-    else:
-        logging.info(f"No Employee ID found for '{best_name}'")
 
-    affiliations, org_name = filter_affiliations(best_match, date) if employee_id else ([], "")
-    return employee_id, affiliations, org_name
+    if not employee_id:
+        logging.debug(f"No Employee ID found for match '{best_name}'")
+        return None, None, [], ""
+
+    affiliations, org_name = filter_affiliations(best_match, date)
+    return employee_id, uuid, affiliations, org_name
+
+
 
 
 def filter_affiliations(data: Dict[str, Any], date: datetime) -> Tuple[List[Dict[str, str]], str]:
@@ -242,57 +260,289 @@ def filter_affiliations(data: Dict[str, Any], date: datetime) -> Tuple[List[Dict
 
 def get_org_type(uuid: str) -> Tuple[str, str]:
     """Determine the type and name of an organization by UUID."""
-    url = f"https://staging.research-portal.uu.nl/ws/api/organizations/{uuid}"
-    headers = {"accept": "application/json", "api-key": API_KEY}
+
+
+    url = f"{BASEURL_CRUD}organizations/{uuid}"
+    headers = {"accept": "application/json", "api-key": APIKEY_CRUD}
     response = SESSION.get(url, headers=headers)
+
     if response.status_code == 200:
         data = response.json()
-        org_type = "Research organization" if "r" in data["type"]["uri"].split("/")[-1] else "Organization"
+        type_segment = data["type"]["uri"].split("/")[-1]
+        if "r" in type_segment:
+            org_type = "Research organization"
+        elif type_segment.startswith("003") or type_segment.startswith("004"):
+            org_type = "dep/fac"
+        else:
+            org_type = "Organization"
+
         return org_type, data["name"]["en_GB"]
+
     return "Unknown", "Unknown"
 
 
-def resolve_persons(names: List[str], date: datetime) -> Tuple[List[Tuple[str, List[Dict[str, str]]]], List[str]]:
-    """Resolve multiple names to Pure person IDs and affiliations."""
+
+def resolve_persons(names: List[str], date: datetime) -> Tuple[List[Tuple[str, str, str, List[Dict[str, str]]]], List[str]]:
+    """Zoekt alle personen op in Pure en geeft lijst terug van (person_id, uuid, oorspronkelijke naam, affiliaties)."""
+
     resolved = []
-    seen = set()  # To track unique (person_id, tuple(affiliations)) pairs
+    seen = set()
     errors = []
 
-    for name in names:
-        person_id, affiliations, org_name = find_person(name.strip(), date)
+    for raw_name in names:
+        name = raw_name.strip()
+
+        person_id, uuid, affiliations, org_name = find_person(name, date)
+
         if person_id and affiliations:
-            # Convert affiliations to a hashable type for deduplication
-            aff_tuple = tuple(sorted(frozenset(d.items()) for d in affiliations))
-            if (person_id, aff_tuple) not in seen:
-                seen.add((person_id, aff_tuple))
-                resolved.append((person_id, name, affiliations))
-                logging.info(f"Resolved '{name}' to ID {person_id}")
+            aff_key = tuple(sorted(frozenset(a.items()) for a in affiliations))
+            dedup_key = (person_id, aff_key)
+
+            if dedup_key not in seen:
+                seen.add(dedup_key)
+                resolved.append((person_id, uuid, name, affiliations))
+                logging.debug(f"Resolved '{name}' → ID {person_id} ({len(affiliations)} affiliations)")
+            else:
+                logging.debug(f"Duplicate person+affiliation found for '{name}', skipping")
         else:
             errors.append(name)
-            logging.warning(f"Failed to resolve '{name}'")
+            logging.debug(f"Failed to resolve '{name}'")
 
     return resolved, errors
 
 
+
 def check_duplicates(title: str, persons: List[Tuple[str, Any]], date: datetime) -> bool:
     """Check if a press clipping already exists in Pure."""
-    url = BASEURL + 'press-media'
-    # url = "https://research-portal.uu.nl/ws/api/524/press-media"
-    params = {"q": title, "apiKey": API_KEY}
-    headers = {"accept": "application/json", "api-key": API_KEY}
+    url = f"{BASEURL}press-media"
+    print(url)
+    searchtitle = title.replace("°", "")
+    params = {"q": searchtitle, "apiKey": API_KEY_OLD}
+    headers = {"accept": "application/json", "api-key": API_KEY_OLD}
     response = SESSION.get(url, params=params, headers=headers)
 
     if response.status_code != 200:
+        print('bla', response.text)
         return False
 
     data = response.json()
+
     for item in data.get("items", []):
+
         item_title = item["title"]["text"][0]["value"].lower()
         item_date = item["period"]["startDate"]
-        person_ids = {assoc["person"]["externalId"] for assoc in item.get("personAssociations", [])}
-        if (item_title == title.lower() and item_date == date.strftime("%Y-%m-%d") and
-                any(p[0] in person_ids for p in persons)):
+        item_date_str = item_date.split("T")[0]
+        person_ids = set()
+        for assoc in item.get("personAssociations", []):
+            if "person" not in assoc:
+                print("⚠️ 'person' ontbreekt in assoc:", assoc)
+                continue
+            for _id in (assoc["person"].get("externalId"), assoc["person"].get("internalId")):
+                if _id:
+                    person_ids.add(_id)
+
+        escaped_input = escape_pure_text(title)
+        escaped_existing = escape_pure_text(item_title)
+
+
+        if (escaped_input == escaped_existing and item_date_str == date.strftime("%Y-%m-%d")) and  any(p[0] in person_ids for p in persons):
+
             return True
+
     return False
+def build_payload_from_row(row):
+    title = html.escape(row['Media item title'])
+    url = row['URL']
+    date = row['Datum'].strftime("%Y-%m-%d") if isinstance(row['Datum'], datetime) else str(row['Datum'])
+    medium = row['Media name']
+    persons = row['Person_resolved']
+    medium_type = row.get('Medium_type', 'Web')
+    media_type = row['media_type'].upper()
+    typerole = row.get('typerole', 'exportcomment')
+    degree = row.get('article_degree', 'national')
+    role_term = row.get('researcher_role', 'interviewee')
+    role_uri = f"/dk/atira/pure/clipping/roles/clipping/{role_term.lower()}"
+
+    if row['Language'] == 'nl':
+        country = 'nl'
+    else:
+        country = 'unknown'
+
+    # Use first organization of first person as managing organization
+
+    # Standaard als niemand gekoppeld is
+    managing_org = {'organization-uuid': 'UNKNOWN', 'systemName': 'Organization'}
+
+    if persons:
+        orgs = persons[0][3]  # lijst van dicts met 'organization-uuid' en 'orgtype'
+        org_with_orgtype = []
+
+        for org in orgs:
+            uuid = org.get("organization-uuid")
+            org_type, _ = get_org_type(uuid)
+            org_with_orgtype.append((org_type, org))
+
+        # Zoek naar prioriteit: Organization > dep/fac > andere
+        org = next((o for t, o in org_with_orgtype if t == "Organization"), None)
+        if not org:
+            org = next((o for t, o in org_with_orgtype if t == "dep/fac"), None)
+        if not org:
+            org = org_with_orgtype[0][1] if org_with_orgtype else None
+
+        if org:
+            managing_org = org
+
+    coverage_persons = []
+    org_set = set()
+    # Voeg vrije trefwoorden toe aan payload
+    keywords = [kw.strip() for kw in row.get('keywords', []) if kw.strip()]
 
 
+    for pure_id, person_uuid, full_name, orgs in persons:
+        first_name, *last_name_parts = full_name.split()
+        last_name = ' '.join(last_name_parts) if last_name_parts else ''
+
+        seen_orgs = set()
+        org_list = []
+        for o in orgs:
+            key = o['organization-uuid']
+            if key not in seen_orgs:
+                seen_orgs.add(key)
+                org_list.append({'uuid': key, 'systemName': 'Organization'})
+
+        for o in org_list:
+            org_set.add((o['uuid'], o['systemName']))
+        coverage_persons.append({
+            "typeDiscriminator": "InternalPressMediaPersonAssociation",
+            "name": {
+                "firstName": first_name,
+                "lastName": last_name
+            },
+            "role": {
+                "uri": role_uri,
+                "term": {
+                    "en_GB": role_term.capitalize()
+                }
+            },
+            "person": {
+                "systemName": "Person",
+                "uuid": person_uuid
+            },
+            "organizations": org_list
+        })
+
+    payload = {
+        "version": "v1",
+        "title": {"en_GB": title},
+        "type": {
+            "uri": f"/dk/atira/pure/clipping/clippingtypes/clipping/{typerole.lower()}",
+            # "term": {"en_GB": "Expert Comment"}
+        },
+        "visibility": {
+            "key": "FREE",
+            "description": {"en_GB": "Public - No restriction"}
+        },
+        # "workflow": {
+        #     "step": "approved",
+        #     "description": {"en_GB": "Approved"}
+        # },
+        "descriptions": [{
+            "value": {"en_GB": f" "},
+            "type": {
+                "uri": "/dk/atira/pure/clipping/descriptions/clippingdescription",
+                "term": {"en_GB": "Description"}
+            }
+        }],
+        "managingOrganization": {
+            "uuid": managing_org['organization-uuid'],
+            "systemName": "Organization"
+        },
+        "mediaCoverages": [{
+            "coverageType": media_type,
+            "title": {"en_GB": title},
+            "description": {"en_GB": f" "},
+            "url": url,
+            "medium": medium,
+            "mediaType": {
+                "uri": f"/dk/atira/pure/clipping/mediatype/{medium_type.lower()}",
+                "term": {"en_GB": medium_type}
+            },
+            "degreeOfRecognition": {
+                "uri": f"/dk/atira/pure/clipping/degreeofrecognition/{degree.lower()}",
+                "term": {"en_GB": degree.capitalize()}
+            },
+            "authorProducer": "",
+            "durationLengthSize": "",
+            "date": date,
+            "country": {
+                "uri": f"/dk/atira/pure/core/countries/{country}",
+                # "term": {"en_GB": "Netherlands"}
+            },
+            "persons": coverage_persons,
+            "organizations": [{"uuid": uuid, "systemName": system_name} for uuid, system_name in org_set]
+        }]
+    }
+
+    payload["workflow"] = build_workflow(row['Faculty'])
+    # standaard classification keywordgroup
+    CLASSIFICATION_GROUP = {
+        "typeDiscriminator": "ClassificationsKeywordGroup",
+
+        "logicalName": "/dk/atira/pure/clippings/keywords/imported",
+        "name": {"en_GB": "Imported by media import tool"},
+        "classifications": [{
+            "uri": "/dk/atira/pure/clippings/keywords/imported/true",
+            "term": {"en_GB": "true"}
+        }]
+    }
+    payload["keywordGroups"] = [CLASSIFICATION_GROUP]
+
+    if keywords:
+        payload["keywordGroups"].append(make_free_keywords_group(keywords))
+
+    return payload
+
+def build_workflow(faculty: str) -> dict:
+    """
+    Bouwt workflow sectie op basis van faculteit uit config.ini
+    """
+    # lookup uit config (default = "approved" als faculteit niet gevonden)
+    print(faculty)
+
+    status = WORKFLOW_STATUS.get(faculty, "approved")
+
+    return {
+        "step": status,
+        "description": {"en_GB": status}
+    }
+
+
+def upload_processed_articles(processed_articles, api_key, api_url_base):
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "api-key": api_key
+    }
+    succes = 0
+    fail = 0
+    for row in processed_articles:
+        payload = build_payload_from_row(row)
+        response = requests.put(f"{api_url_base}/pressmedia", headers=headers, data=json.dumps(payload))
+
+
+        if response.status_code in (200, 201):
+            location = response.headers.get("Location", "N/A")
+            logging.info(f"✓ Created at: {location}")
+            succes += 1
+        else:
+            logging.warning(f"✗ Error: {response.text}")
+            fail += 1
+    logging.info(f"Uploaded articles: {succes}")
+
+def get_media_item(uuid):
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "api-key": APIKEY_CRUD
+    }
+    response = requests.get(f"{BASEURL_CRUD}/pressmedia/{uuid}", headers=headers)

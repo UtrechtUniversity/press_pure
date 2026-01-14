@@ -6,7 +6,7 @@ from pathlib import Path
 # Path to your Excel file
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-excel_file = ROOT_DIR / 'files' / 'query.xlsx'
+excel_file = ROOT_DIR / 'files' / 'query.xls'
 output_file = ROOT_DIR / 'output' /  'queries_per_faculty.txt'
 
 # Read the Excel file
@@ -35,12 +35,11 @@ with open(output_file, "w", encoding="utf-8") as f_out:
         # For each chunk, create a query
         for chunk_idx, chunk in enumerate(chunks, start=1):
             # Construct the query
-            query = '("Utrecht University" OR "Universiteit Utrecht") AND (' \
-                    + " OR ".join(f'"{name}"' for name in chunk) + ')'
+            query = '("Utrecht University" OR "Universiteit Utrecht") NEAR/50 (' \
+                    + " OR".join(f'"{name}"' for name in chunk) + ')'
             print(f"Number of chunks for {org_unit}:", len(chunks))
             # Write the faculty and the query
             f_out.write(f"faculty: {org_unit}\n")
             f_out.write(query + "\n\n")
-
 
 print(f"Done! Queries have been written to {output_file}")
