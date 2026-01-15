@@ -33,7 +33,7 @@ OPENAI_API = CONFIG['CREDENTIALS']['OPENAI_API']
 APIKEY_CRUD = CONFIG['CREDENTIALS']['APIKEY_CRUD']
 BASEURL_CURD = CONFIG['CREDENTIALS']['BASEURL_CRUD']
 WORKFLOW_STATUS = dict(CONFIG["WORKFLOW STATUS"])
-
+AI = CONFIG.getboolean('AI', 'AI')
 
 FACULTY_MAP = {
     "Beta 1": "BETA",
@@ -104,12 +104,13 @@ def main():
     counter = 0
     duplicates = 0
     no_valid_names = 0
-    AI = True
+    logging.info(f"Starting batch persons lookup for {len(all_articles)} articles")
+
     for article in all_articles:
         counter += 1
-        print (article["Person"])
+
         persons, errors = pure_functions.resolve_persons(article["Person"], article["Datum"])
-        print(persons)
+
         # Skip als helemaal niks bruikbaars
         if not persons and not article.get("Person"):
             no_valid_names += 1

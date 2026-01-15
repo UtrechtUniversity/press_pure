@@ -140,10 +140,9 @@ def multi_engine_resolve(url, title, session, headers):
     if ddg_result:
         return ddg_result
 
-    fallback_url = f"https://www.google.com/search?q={quote_plus(title)}"
-    # fallback_url = f""
-    logging.debug(f"Fallback Google search for '{title}': {fallback_url}")
-    return fallback_url
+
+    return None
+
 
 def batch_resolve_urls(articles, session, headers, max_workers=10):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -216,7 +215,7 @@ def find_person(name: str, date: datetime, threshold: int = 95) -> Tuple[Optiona
         for candidate in possible_names:
             score = fuzz.ratio(name.lower(), candidate.lower())
             logging.debug(f"Comparing '{name}' ↔ '{candidate}' = {score}%")
-            print(f"Comparing '{name}' ↔ '{candidate}' = {score}%")
+
             if score > best_score:
                 best_match, best_score, best_name = item, score, candidate
 
@@ -315,14 +314,14 @@ def resolve_persons(names: List[str], date: datetime) -> Tuple[List[Tuple[str, s
 def check_duplicates(title: str, persons: List[Tuple[str, Any]], date: datetime) -> bool:
     """Check if a press clipping already exists in Pure."""
     url = f"{BASEURL}press-media"
-    print(url)
+
     searchtitle = title.replace("°", "")
     params = {"q": searchtitle, "apiKey": API_KEY_OLD}
     headers = {"accept": "application/json", "api-key": API_KEY_OLD}
     response = SESSION.get(url, params=params, headers=headers)
 
     if response.status_code != 200:
-        print('bla', response.text)
+
         return False
 
     data = response.json()
@@ -528,7 +527,6 @@ def upload_processed_articles(processed_articles, api_key, api_url_base):
     for row in processed_articles:
         payload = build_payload_from_row(row)
         response = requests.put(f"{api_url_base}/pressmedia", headers=headers, data=json.dumps(payload))
-
 
         if response.status_code in (200, 201):
             location = response.headers.get("Location", "N/A")

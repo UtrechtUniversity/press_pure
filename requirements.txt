@@ -6,3 +6,5 @@ requests
 rapidfuzz
 openai
 pyperclip
+langdetect
+openpyxl
