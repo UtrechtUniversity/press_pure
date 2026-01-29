@@ -62,7 +62,10 @@ def rename_typerole(typerole):
 def ai_getinfo(row):
     client = OpenAI(api_key=OPENAI_API)
     url = row['URL']
-    article = fetch_article_text(url, row['Media item title'])
+    if url:
+        article = fetch_article_text(url, row['Media item title'])
+    else:
+        article = row["Media item title"]
     title = row["Media item title"]
     source = row["Media name"]
     # Extract names
@@ -115,14 +118,16 @@ def ai_getinfo(row):
         "Medium_type": "value"
     }}
     """
-
+    MAX_CHARS = 12000  # ~3k tokens
+    prompt = prompt[:MAX_CHARS]
     # Create a chat completion
     response = client.chat.completions.create(
         model="gpt-4-turbo",
         messages=[
             {"role": "system", "content": "Return only valid JSON without explanation."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": prompt},
         ]
+
     )
 
     ai_output = response.choices[0].message.content
