@@ -13,8 +13,8 @@ from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import configparser
 
-blacklist_names = ['Anton Pijpers', 'David Beverborg']
-# Determine project root and filter file path
+logger = logging.getLogger(__name__)
+
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 FILTER_FILE = PROJECT_ROOT / "files" / "Filter_media.xlsx"
@@ -23,6 +23,12 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
 CONFIG.read(CONFIG_PATH)
 CONFIG.read('config.cfg')
+
+blacklist_names = [
+    name.strip()
+    for name in CONFIG.get("FILTERS", "BLACKLIST_NAMES", fallback="").split(",")
+    if name.strip()
+]
 
 # List of unwanted terms
 unwanted_terms_raw = CONFIG.get("FILTERS", "UNWANTED_TERMS", fallback="")
@@ -79,7 +85,7 @@ def parse_date(date_str: str) -> datetime | None:
         cleaned_date = clean_text(date_str)
         return datetime.strptime(cleaned_date, "%d %b %Y %H:%M")
     except ValueError as e:
-        logging.warning(f"Failed to parse date '{date_str}': {e}")
+        logger.warning(f"Failed to parse date '{date_str}': {e}")
         return None
 
 def extract_faculties(soup: BeautifulSoup) -> list[str]:
@@ -234,6 +240,9 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
     """Parse an HTML file and extract article metadata."""
 
     soup = extract_html_from_eml(file_path)
+    if soup is None:
+        logger.warning(f"No HTML body found in email: {file_path.name}")
+        return []
     # with file_path.open("r", encoding="utf-8") as f:
     #     soup = BeautifulSoup(f.read(), "html.parser")
 
@@ -243,7 +252,7 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
     else:
         filtered_sources = set()
         filtered_titles = set()
-        logging.warning(f"Filter file not found: {FILTER_FILE}. No sources will be filtered.")
+        logger.warning(f"Filter file not found: {FILTER_FILE}. No sources will be filtered.")
 
     articles = []
     for block in soup.find_all("tr", class_="article_container"):
@@ -258,11 +267,11 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
             lang = detect(title)
 
             if lang not in ALLOWED_LANGUAGES:
-                logging.debug(f"Skipped not allowed language article: '{title}' (lang: {lang})")
+                logger.debug(f"Skipped not allowed language article: '{title}' (lang: {lang})")
                 continue
 
         except LangDetectException:
-            logging.debug(f"Language detection failed for: '{title}'")
+            logger.debug(f"Language detection failed for: '{title}'")
             continue
         url = title_tag.get("href", "")[:1024]
         date_tag = block.find("span", class_="article-email-harvest-date")
@@ -271,11 +280,11 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
         source = clean_text(source_tag.get_text(strip=True)) if source_tag else "Unknown"
 
         if source in filtered_sources:
-            logging.info(f"Skipped article from filtered source: '{source}' - '{title}'")
+            logger.info(f"Skipped article from filtered source: '{source}' - '{title}'")
             continue
 
         if any(word in title for word in filtered_titles):
-            logging.info(f"Skipped article with filtered word in title: '{title}'")
+            logger.info(f"Skipped article with filtered word in title: '{title}'")
             continue
 
         if date:  # Only include articles with a valid date

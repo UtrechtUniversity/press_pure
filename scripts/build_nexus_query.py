@@ -1,45 +1,93 @@
-from bs4 import BeautifulSoup
-import os
-import pyperclip
+"""Generate Nexus proximity search queries from a Pure persons export."""
+
+import configparser
 import pandas as pd
 from pathlib import Path
-# Path to your Excel file
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
+CONFIG = configparser.ConfigParser()
+CONFIG.read(CONFIG_PATH)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-excel_file = ROOT_DIR / 'files' / 'query.xls'
-output_file = ROOT_DIR / 'output' /  'queries_per_faculty.txt'
 
-# Read the Excel file
-# Adjust sheet_name if needed, or remove to use the first sheet by default.
-df = pd.read_excel(excel_file, sheet_name=0)
 
-# Optional: rename columns for clarity if needed, e.g.,
-# df.rename(columns={"Organisational unit-0": "Organisational unit",
-#                    "Name variant-1": "Name variant"}, inplace=True)
+def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
+    if input_file.suffix.lower() == ".csv":
+        df = pd.read_csv(input_file)
+    else:
+        df = pd.read_excel(input_file, sheet_name=0)
 
-# Group the data by the "Organisational unit" column
-groups = df.groupby("Organisations > Organisational unit-0")
+    org_col_candidates = [
+        "Organisations > Organisational unit-0",
+        "Organisational unit name",
+        "Alle organisational units",
+    ]
+    name_col_candidates = [
+        "Name variant > Known as name-1",
+        "Name",
+    ]
 
-# Define the threshold per query
-limit = 1300
-# Open the output file
-with open(output_file, "w", encoding="utf-8") as f_out:
-    # Iterate over each group (i.e., each organisational unit)
-    for org_unit, group_df in groups:
-        # Collect all the name variants for this organisational unit
-        name_variants = group_df["Name variant > Known as name-1"].dropna().unique().tolist()
+    org_col = next((col for col in org_col_candidates if col in df.columns), None)
+    name_col = next((col for col in name_col_candidates if col in df.columns), None)
 
-        # Chunk the name variants
-        chunks = [name_variants[i:i + limit] for i in range(0, len(name_variants), limit)]
+    if org_col is None or name_col is None:
+        raise ValueError(
+            "Onbekende query-indeling. Gevonden kolommen: "
+            f"{list(df.columns)}"
+        )
 
-        # For each chunk, create a query
-        for chunk_idx, chunk in enumerate(chunks, start=1):
-            # Construct the query
-            query = '("Utrecht University" OR "Universiteit Utrecht") NEAR/50 (' \
-                    + " OR".join(f'"{name}"' for name in chunk) + ')'
-            print(f"Number of chunks for {org_unit}:", len(chunks))
-            # Write the faculty and the query
-            f_out.write(f"faculty: {org_unit}\n")
-            f_out.write(query + "\n\n")
+    result_df = pd.DataFrame()
+    result_df["org_unit"] = df[org_col]
+    if "Alle organisational units" in df.columns:
+        result_df["org_unit"] = result_df["org_unit"].fillna(df["Alle organisational units"])
+    result_df["name_variant"] = df[name_col]
+    result_df["org_unit"] = result_df["org_unit"].astype("string").str.strip()
+    result_df["name_variant"] = result_df["name_variant"].astype("string").str.strip()
 
-print(f"Done! Queries have been written to {output_file}")
+    def extract_faculties(org_value: str) -> list[str]:
+        if pd.isna(org_value):
+            return []
+        parts = [part.strip() for part in str(org_value).split("//")]
+        faculties = [part for part in parts if part.startswith("Faculteit ")]
+        if not faculties and str(org_value).startswith("Faculteit "):
+            faculties = [str(org_value).strip()]
+        return faculties
+
+    result_df["org_unit"] = result_df["org_unit"].apply(extract_faculties)
+    result_df = result_df.explode("org_unit")
+    return result_df.dropna(subset=["org_unit", "name_variant"])
+
+
+def build_queries(input_file: Path, output_file: Path, limit: int = 1300) -> None:
+    name_nl = CONFIG["NAME"]["DUTCH"]
+    name_en = CONFIG["NAME"]["ENGLISH"]
+    org_part = f'("{name_en.title()}" OR "{name_nl.title()}")'
+
+    df = _load_query_dataframe(input_file)
+    groups = df.groupby("org_unit")
+
+    with open(output_file, "w", encoding="utf-8") as f_out:
+        for org_unit, group_df in groups:
+            name_variants = group_df["name_variant"].dropna().unique().tolist()
+            chunks = [name_variants[i:i + limit] for i in range(0, len(name_variants), limit)]
+
+            print(f"{org_unit}: {len(chunks)} chunk(s)")
+            for chunk in chunks:
+                query = (
+                    f"{org_part} NEAR/50 ("
+                    + " OR ".join(f'"{name}"' for name in chunk)
+                    + ")"
+                )
+                f_out.write(f"faculty: {org_unit}\n{query}\n\n")
+
+    print(f"Queries written to {output_file}")
+
+
+if __name__ == "__main__":
+    default_input = ROOT_DIR / "files" / "query.csv"
+    if not default_input.exists():
+        default_input = ROOT_DIR / "files" / "query.xls"
+    build_queries(
+        input_file=default_input,
+        output_file=ROOT_DIR / "output" / "queries_per_faculty.txt",
+    )

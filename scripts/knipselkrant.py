@@ -1,173 +1,184 @@
 #!/usr/bin/env python3
-"""Main script to process LexisNexis press clippings and generate Pure-compatible XMLor json for ."""
+"""Main pipeline: parse LexisNexis .eml files → resolve URLs → match persons → enrich → upload to Pure."""
 
-from datetime import datetime
 import logging
 import locale
-import pandas as pd
-import nltk
-import pure_functions
-import xml_builder
-import configparser
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
+
+import configparser
+import nltk
+import pandas as pd
+
 import ai_functions
 import parsing_functions
-import re
+import pdf_archiver
+import pure_functions
+import url_resolver
+import xml_builder
+
+logger = logging.getLogger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = ROOT_DIR / "knipsel"
 OUTPUT_DIR = ROOT_DIR / "output"
 LOG_DIR = ROOT_DIR / "logs"
 
-# Set locale to Dutch for month abbreviations
 locale.setlocale(locale.LC_TIME, "nl_NL.UTF-8")
 
-
-CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
+CONFIG_PATH = ROOT_DIR / "config.cfg"
 CONFIG = configparser.ConfigParser()
 CONFIG.read(CONFIG_PATH)
-CONFIG.read('config.cfg')  # Abatch_resolve_urlsdjust path if needed
-GOOGLE_API = CONFIG['CREDENTIALS']['GOOGLE_API']
-GOOGLE_CX = CONFIG['CREDENTIALS']['GOOGLE_CX']
-OPENAI_API = CONFIG['CREDENTIALS']['OPENAI_API']
-APIKEY_CRUD = CONFIG['CREDENTIALS']['APIKEY_CRUD']
-BASEURL_CURD = CONFIG['CREDENTIALS']['BASEURL_CRUD']
-WORKFLOW_STATUS = dict(CONFIG["WORKFLOW STATUS"])
-AI = CONFIG.getboolean('AI', 'AI')
+APIKEY_CRUD = CONFIG["CREDENTIALS"]["APIKEY_CRUD"]
+BASEURL_CRUD = CONFIG["CREDENTIALS"]["BASEURL_CRUD"]
+AI = CONFIG.getboolean("AI", "AI")
+DOWNLOAD_PDFS = CONFIG.getboolean("PDF", "DOWNLOAD", fallback=False)
 
 FACULTY_MAP = {
-    "Beta 1": "BETA",
-    "Beta 2": "BETA",
-    "Beta 3": "BETA",
-    "DGK": "DGK",
-    "FSW": "FSW",
-    "GEO": "GEO",
-    "GW": "GW",
-    "REBO": "REBO"
+    "Beta 1": "BETA", "Beta 2": "BETA", "Beta 3": "BETA",
+    "DGK": "DGK", "FSW": "FSW", "GEO": "GEO", "GW": "GW", "REBO": "REBO",
 }
 
-def extract_faculty(filename: str) -> str | None:
-    """
-    Haalt de faculteitsnaam uit een bestandsnaam.
-    Normaliseert naar vaste afkorting indien mogelijk.
-    """
-    match = re.search(r"faculteit (.*?) -", filename)
-    if not match:
-        return None
-    raw_faculty = match.group(1).strip()
-    return FACULTY_MAP.get(raw_faculty, raw_faculty)
 
 def setup_logging() -> None:
-    """Configure logging to file and console with a timestamped log file."""
     LOG_DIR.mkdir(exist_ok=True)
     log_file = LOG_DIR / f"press_import_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[
             logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
+            logging.StreamHandler(),
+        ],
     )
-    logging.info("Press clipping processing started.")
 
-def deduplicate_articles_by_fields(articles, fields):
+
+def extract_faculty(filename: str) -> str | None:
+    match = re.search(r"faculteit (.*?) -", filename)
+    if not match:
+        return None
+    return FACULTY_MAP.get(match.group(1).strip(), match.group(1).strip())
+
+
+def deduplicate_articles(articles: list, fields: list) -> list:
     seen = set()
-    unique_articles = []
-
+    unique = []
     for article in articles:
-        identifier = tuple(article[field] for field in fields)
-        if identifier not in seen:
-            seen.add(identifier)
-            unique_articles.append(article)
-
-    return unique_articles
-
+        key = tuple(article[f] for f in fields)
+        if key not in seen:
+            seen.add(key)
+            unique.append(article)
+    return unique
 
 
-def main():
+def process_article(article: dict) -> tuple[dict | None, str]:
+    """Resolve persons, check duplicates, and enrich a single article.
+
+    Returns (article, status) where status is 'ok', 'duplicate', or 'no_persons'.
+    """
+    persons, _ = pure_functions.resolve_persons(article["Person"], article["Datum"])
+
+    if not persons and not article.get("Person"):
+        return None, "no_persons"
+
+    if pure_functions.check_duplicates(article["Media item title"], persons, article["Datum"]):
+        return None, "duplicate"
+
+    if not persons:
+        return None, "no_persons"
+
+    article["Person_resolved"] = persons
+
+    if AI:
+        article = ai_functions.ai_getinfo(article)
+    else:
+        article["article_degree"] = "national"
+        article["researcher_role"] = "interviewee"
+        article["media_type"] = "Contribution"
+        article["typerole"] = "exportcomment"
+        article["goodfit"] = "yes"
+        article["keywords"] = article["Keywords"]
+        article["Medium_type"] = "Web"
+
+    return article, "ok"
+
+
+def main() -> None:
     setup_logging()
     OUTPUT_DIR.mkdir(exist_ok=True)
+    logger.info("Press clipping processing started.")
 
+    # --- Phase 1: Parse .eml files -------------------------------------------
+    t = time.time()
     all_articles = []
-    for html_file in INPUT_DIR.rglob("*.eml"):
-        logging.info(f"Processing file: {html_file.name}")
-        faculty = extract_faculty(html_file.name)
-        articles = parsing_functions.process_html_file(html_file, faculty)
+    for eml_file in INPUT_DIR.rglob("*.eml"):
+        logger.info(f"Parsing: {eml_file.name}")
+        faculty = extract_faculty(eml_file.name)
+        all_articles.extend(parsing_functions.process_html_file(eml_file, faculty))
+    logger.info(f"Parsed {len(all_articles)} articles in {time.time()-t:.1f}s")
 
-        all_articles.extend(articles)
+    # --- Phase 2: Resolve URLs -----------------------------------------------
+    t = time.time()
+    url_resolver.batch_resolve_urls(all_articles)
+    logger.info(f"URL resolution done in {time.time()-t:.1f}s")
 
-    logging.info(f"Starting batch URL resolution for {len(all_articles)} articles")
-    pure_functions.batch_resolve_urls(all_articles, pure_functions.SESSION, pure_functions.HEADERS)
-
+    # --- Phase 3: Person lookup, dedup, enrichment (parallel) ----------------
+    t = time.time()
     processed_articles = []
-    counter = 0
-    duplicates = 0
-    no_valid_names = 0
-    logging.info(f"Starting batch persons lookup for {len(all_articles)} articles")
+    counts = {"ok": 0, "duplicate": 0, "no_persons": 0, "error": 0}
 
-    for article in all_articles:
-        counter += 1
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_article, article): article for article in all_articles}
+        for future in as_completed(futures):
+            try:
+                result, status = future.result()
+            except Exception as e:
+                logger.warning(f"Article processing error: {e}")
+                counts["error"] += 1
+                continue
+            counts[status] += 1
+            if status == "ok":
+                processed_articles.append(result)
 
-        persons, errors = pure_functions.resolve_persons(article["Person"], article["Datum"])
-
-        # Skip als helemaal niks bruikbaars
-        if not persons and not article.get("Person"):
-            no_valid_names += 1
-            continue
-
-        # Check op duplicaat
-        if pure_functions.check_duplicates(article["Media item title"], persons, article["Datum"]):
-            duplicates += 1
-            continue
-
-        # Als er wel personen zijn, verwerken
-        if persons:
-            article["Person_resolved"] = persons
-
-            if AI:
-                article = ai_functions.ai_getinfo(article)
-            else:
-                article['article_degree'] = "national"
-                article['researcher_role'] = "interviewee"
-                article['media_type'] = "Contribution"
-                article['typerole'] = "exportcomment"
-                article['goodfit'] = "yes"
-                article['keywords'] = article["Keywords"]
-                article['Medium_type'] = "Web"
-
-            processed_articles.append(article)
-        else:
-            no_valid_names += 1
-
-        # if counter ==2:
-        #     break
-    # Log final count
-    pd.DataFrame(processed_articles).to_excel(LOG_DIR / "processed_articles.xlsx", index=False)
-    logging.info(f"Processed {counter} articles")
-    logging.info(f"Found {no_valid_names} articles without valid Pure persons")
-    logging.info(f"Found {duplicates} duplicates")
-    dedup_fields = ['Media item title', 'URL']
-    processed_articles = deduplicate_articles_by_fields(processed_articles, dedup_fields)
-
-    pd.DataFrame(processed_articles).to_excel(LOG_DIR / "processed_articles2.xlsx", index=False)
-    logging.info(f"Processed {len(processed_articles)} of {len(all_articles)} articles into XML")
-
-
-    xml_content = xml_builder.build_xml(processed_articles)
-
-    pure_functions.upload_processed_articles(
-        processed_articles,
-        api_key=APIKEY_CRUD,
-        api_url_base=BASEURL_CURD
+    logger.info(
+        f"Processing done in {time.time()-t:.1f}s — "
+        f"{counts['ok']} ok, {counts['duplicate']} duplicates, "
+        f"{counts['no_persons']} no persons, {counts['error']} errors"
     )
 
+    # Deduplicate by title + URL before export
+    processed_articles = deduplicate_articles(processed_articles, ["Media item title", "URL"])
+    logger.info(f"{len(processed_articles)} unique articles after deduplication")
+
+    # Debug export
+    pd.DataFrame(processed_articles).to_excel(LOG_DIR / "processed_articles.xlsx", index=False)
+
+    # --- Phase 4: Archive as PDF (optional) ----------------------------------
+    if DOWNLOAD_PDFS:
+        t = time.time()
+        saved = pdf_archiver.batch_save_pdfs(processed_articles, OUTPUT_DIR / "pdf")
+        logger.info(f"PDF archiving done in {time.time()-t:.1f}s: {saved}/{len(processed_articles)} saved")
+    else:
+        logger.info("PDF archiving skipped (PDF.DOWNLOAD=false)")
+
+    # --- Phase 5: Build XML + upload -----------------------------------------
+    t = time.time()
+    xml_content = xml_builder.build_xml(processed_articles)
     output_file = OUTPUT_DIR / f"press_clippings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml"
     output_file.write_text(xml_content, encoding="utf-8")
-    logging.info(f"Generated XML file: {output_file}")
+    logger.info(f"XML written to {output_file}")
+
+    pure_functions.upload_processed_articles(
+        processed_articles, api_key=APIKEY_CRUD, api_url_base=BASEURL_CRUD
+    )
+    logger.info(f"Upload phase done in {time.time()-t:.1f}s")
+    logger.info("Pipeline complete.")
 
 
 if __name__ == "__main__":
-    nltk.download("punkt")
-    nltk.download("stopwords")
+    nltk.download("punkt", quiet=True)
+    nltk.download("stopwords", quiet=True)
     main()

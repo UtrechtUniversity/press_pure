@@ -1,27 +1,32 @@
 import json
+import logging
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 import configparser
 from pathlib import Path
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import requests
 from bs4 import BeautifulSoup
-import re
+
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
 CONFIG.read(CONFIG_PATH)
-CONFIG.read('config.cfg')  # Adjust path if needed
-GOOGLE_API = CONFIG['CREDENTIALS']['GOOGLE_API']
-GOOGLE_CX = CONFIG['CREDENTIALS']['GOOGLE_CX']
+CONFIG.read('config.cfg')
 OPENAI_API = CONFIG['CREDENTIALS']['OPENAI_API']
 
+MODEL = "gpt-4o-mini"
+MAX_ARTICLE_CHARS = 2000  # Limit article body before building the prompt
+
+# Client once at module level — not per article
+_client = OpenAI(api_key=OPENAI_API)
 
 
 def fetch_article_text(url, fallback_title):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-
     session = requests.Session()
     retries = Retry(
         total=3,
@@ -36,18 +41,16 @@ def fetch_article_text(url, fallback_title):
 
     try:
         response = session.get(url, headers=headers, timeout=10)
-
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, "html.parser")
-            article_text = soup.get_text(separator="\n", strip=True)
-            return article_text
+            return soup.get_text(separator="\n", strip=True)
         else:
-            print(f"[WARN] Failed to fetch page {url}, status code: {response.status_code}")
+            logger.warning(f"Failed to fetch page {url}, status code: {response.status_code}")
             return fallback_title
-
     except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Exception fetching URL {url}: {e}")
+        logger.warning(f"Exception fetching URL {url}: {e}")
         return fallback_title
+
 
 def rename_typerole(typerole):
     if typerole == "public engagement activity":
@@ -60,129 +63,75 @@ def rename_typerole(typerole):
 
 
 def ai_getinfo(row):
-    client = OpenAI(api_key=OPENAI_API)
     url = row['URL']
     if url:
-        article = fetch_article_text(url, row['Media item title'])
+        article_text = fetch_article_text(url, row['Media item title'])
     else:
-        article = row["Media item title"]
+        article_text = row["Media item title"]
+
+    # Truncate article body before building the prompt so the rest is always intact
+    article_text = article_text[:MAX_ARTICLE_CHARS]
+
     title = row["Media item title"]
     source = row["Media name"]
-    # Extract names
-    names = ", ".join(person[1] for person in row['Person_resolved'])
-
-    # Extract organizations
+    # person tuple: (employee_id, uuid, original_name, affiliations)
+    names = ", ".join(person[2] for person in row['Person_resolved'])
     organizations = ", ".join(org['orgname'] for person in row['Person_resolved'] for org in person[3])
 
-    # Construct the prompt using an f-string to include variable values
-    prompt = f"""
-    I have an article with the following details:
-    - Article Title: {title}
-    - Source: {source}
-    - University Researcher: {names}
-    - Article Content: {article}
-    - Organisation: {organizations}
+    prompt = f"""I have an article with the following details:
+- Title: {title}
+- Source: {source}
+- Researcher: {names}
+- Organisation: {organizations}
+- Content (excerpt): {article_text}
 
-    Please perform the following tasks:
+Return a JSON object with exactly these fields:
 
-    1. Extract the four most relevant keywords from the article.
-       - Return them as a list of words or short phrases of maximum two words.
+1. "keywords": list of 4 relevant keywords (max 2 words each)
+2. "degree": one of "local", "national", "international" (English article → international)
+3. "researcher_role": one of "research cited", "interviewee", "participant", "author"
+   - interviewee: quoted as only person
+   - author: ONLY if clearly stated
+   - participant: default when in doubt
+4. "typerole": one of "expert comment", "research", "public engagement activity"
+5. "Medium_type": one of "Radio", "TV", "Web" (use Web if unclear)
+"""
 
-    2. Determine the degree of recognition.
-       - If the language is English → "international"
-       - Otherwise → "national"
-       - If very local → "local"
-
-    3. Researcher’s Role (choose only from):
-       - "research cited"
-       - "interviewee" (quoted as only person)
-       - "participant" (quoted with others – default if doubt)
-       - "author" (ONLY if clearly stated)
-
-    4. Typerole (one of):
-       - "expert comment"
-       - "research"
-       - "public engagement activity"
-
-    5. Medium_type:
-       - "Radio" (only if explicitly clear)
-       - "TV" (only if explicitly clear)
-       - "Web" (if unclear)
-
-    Return ONLY valid JSON, nothing else:
-    {{
-        "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"],
-        "degree": "value",
-        "researcher_role": "value",
-        "typerole": "value",
-        "Medium_type": "value"
-    }}
-    """
-    MAX_CHARS = 12000  # ~3k tokens
-    prompt = prompt[:MAX_CHARS]
-    # Create a chat completion
-    response = client.chat.completions.create(
-        model="gpt-4-turbo",
-        messages=[
-            {"role": "system", "content": "Return only valid JSON without explanation."},
-            {"role": "user", "content": prompt},
-        ]
-
-    )
-
-    ai_output = response.choices[0].message.content
-
-    # Extract possible JSON object
-    match = re.search(r'\{[\s\S]*\}', ai_output)
-
-    if not match:
-        print(f"⚠️ Geen JSON gevonden voor artikel '{title}', AI-output:")
-        print(ai_output)
-        # fallback, zodat script niet crasht
+    try:
+        response = _client.chat.completions.create(
+            model=MODEL,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a metadata classifier. Return only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        data = json.loads(response.choices[0].message.content)
+    except Exception as e:
+        logger.warning(f"AI call failed for '{title}': {e}")
         data = {
             "keywords": [],
-            "degree": "unknown",
-            "researcher_role": "unknown",
+            "degree": "national",
+            "researcher_role": "participant",
             "typerole": "unknown",
-            "Medium_type": "unknown",
+            "Medium_type": "Web",
         }
-    else:
-        clean_json = match.group(0)
-        clean_json = re.sub(r',\s*([\]}])', r'\1', clean_json)
 
-        try:
-            data = json.loads(clean_json)
-        except Exception:
-            print(f"⚠️ JSON probleem voor artikel '{title}', AI-output:")
-            print(ai_output)
-            # fallback
-            data = {
-                "keywords": [],
-                "degree": "unknown",
-                "researcher_role": "unknown",
-                "typerole": "unknown",
-                "Medium_type": "unknown",
-            }
-
-    # Assign values to variables
-    row['article_degree'] = data.get("degree", "degree not found")
+    row['article_degree'] = data.get("degree", "national")
     row['researcher_role'] = data.get("researcher_role", "participant")
 
-    if row['researcher_role'] == "research cited" or row['researcher_role'] == 'researchcited':
+    if row['researcher_role'] in ("research cited", "researchcited"):
         row['researcher_role'] = 'researchcited'
-        row['media_type'] =  "Coverage"
-
+        row['media_type'] = "Coverage"
     else:
-        if row['researcher_role'] != "author" and row['researcher_role'] != "interviewee":
+        if row['researcher_role'] not in ("author", "interviewee"):
             row['researcher_role'] = 'participant'
         row['media_type'] = "Contribution"
 
-    row['typerole'] = data.get("typerole", "Unknown typerole")
-    row['typerole'] = rename_typerole(row['typerole'])
-    print(title, row['typerole'])
-    row['goodfit'] = data.get("goodfit", "Unknown goodfit")
-    row['keywords'] = data.get("keywords", "")
-    row['Medium_type'] = data.get("Medium_type", "web")
+    row['typerole'] = rename_typerole(data.get("typerole", "unknown"))
+    row['goodfit'] = "yes"
+    row['keywords'] = data.get("keywords", [])
+    row['Medium_type'] = data.get("Medium_type", "Web")
 
-
+    logger.info(f"AI classified '{title}': role={row['researcher_role']}, type={row['typerole']}")
     return row
