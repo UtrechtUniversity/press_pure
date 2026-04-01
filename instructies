@@ -1,0 +1,24 @@
+stap 1 ga naar https://github.com/UtrechtUniversity/press_pure
+clone repository
+
+stap 2 installeer dependencies
+in root van project:
+pip install -r requirements.txt
+
+stap 3 pas de config file aan:
+vul de apikey keys, url van pure in (zowel crud als oude)
+vul de open ai api key in als je AI aangevulde media items wil
+
+stap 4 pas de filter_media.xls file aan:
+in files staat en bestand met media namen (bronen die uitgesloten worden) en Media titles (titels die uitgesloten worden op basis van bv woorden als call for papers)
+
+stap 5 maak rapport in pure, en maak knipselkrant
+    • gebruik de xml file in files als basis om een raport in pure te maken van personen
+    • download dit bestand en zet deze in files,  noem deze ‘query.xls’
+    * draai nu het script build_nexus_query.py
+    • het resultaat is de ‘queries_per_faculteit.txt” (in folder output). deze kun je in de Nexis newsdek als basis gebruiken voor de knipselkrant
+    • Maak de knipselkrant. De output is een ‘xxx’ bestand
+    • zet deze (of meerdere bestanden) in de folder knipselkrant. Deze bestanden hebben de extentie .eml
+
+stap 6 run de knipselkrant
+python knipselkrant.py
