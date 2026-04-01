@@ -1,0 +1,185 @@
+{
+  "title": "UU leerstoel report Persons CURRENT",
+  "description": "",
+  "category": null,
+  "primaryDriverSystemNames": [
+    "Person"
+  ],
+  "sharingType": "NOT_SHARED",
+  "sharedWithUserIds": [],
+  "shareSnapshotsWithUserIds": [],
+  "sendNotifications": true,
+  "schedulingDefinition": null,
+  "locale": "en_GB",
+  "dataTableExportFormat": "CSV",
+  "shareDataStorySnapshot": true,
+  "dataTablesToExport": [],
+  "serializedReport": {
+    "version": "5.34.3",
+    "migration": 23,
+    "dataSet": null,
+    "dataSets": [
+      {
+        "id": "d182a87d-b972-8f83-c2a9-bfec8fb246e4",
+        "name": "Data table (2)",
+        "series": [
+          {
+            "id": "37b9b9ff-a464-df30-3916-ea22428ad6d2",
+            "systemName": "Person",
+            "functions": [
+              {
+                "id": "ca42fbd1-2a26-ecbf-7443-a9998ed570d9",
+                "functionId": "Person.project(name)",
+                "type": "PROJECTION",
+                "width": 169
+              }
+            ],
+            "filters": [
+              {
+                "filterId": "Person.filter(activeAcademicStaffAtOrganisation)",
+                "groupRef": "data-set-group",
+                "hierarchicalContent": {
+                  "ids": [
+                    "13621"
+                  ],
+                  "limitationType": "MATCH",
+                  "limitSelectionToFirstId": false,
+                  "includeUnitsBelow": true,
+                  "asMultiId": false
+                }
+              }
+            ],
+            "filterExpression": {
+              "version": 2,
+              "expression": [
+                {
+                  "exprId": "0f2e9ad0-3e5d-f0cf-aafd-5eb05bf11ef4",
+                  "expr": "VALUE",
+                  "ref": "Person.filter(activeAcademicStaffAtOrganisation)",
+                  "groupIdRef": "data-set-group"
+                },
+                {
+                  "exprId": "data-set-group",
+                  "expr": "GROUP",
+                  "exprGroupType": "EXPR"
+                }
+              ]
+            }
+          },
+          {
+            "id": "ec9f6e24-da0e-64ec-4933-bd4a5bdcfbed",
+            "driverRelation": {
+              "driverSeriesId": "37b9b9ff-a464-df30-3916-ea22428ad6d2",
+              "semanticRelationshipId": "Person.currentlyAffiliatedWith(Organisation)"
+            },
+            "systemName": "Organisation",
+            "functions": [
+              {
+                "id": "b545e5ab-c6ff-ba9f-8f64-7b62e88f1344",
+                "functionId": "Organisation.project(name)",
+                "type": "PROJECTION",
+                "emission": {
+                  "sampleSize": 100,
+                  "delimiter": " // "
+                },
+                "expanded": false,
+                "width": 557,
+                "customLabel": "Alle organisational units"
+              }
+            ],
+            "filters": [
+              {
+                "filterId": "Organisation.filter(type)",
+                "groupRef": "data-set-group",
+                "selectMany": {
+                  "limitationType": "MATCH",
+                  "mode": "ELIMINATE_ROWS",
+                  "values": [],
+                  "variant": "standard"
+                }
+              }
+            ],
+            "filterExpression": {
+              "version": 2,
+              "expression": [
+                {
+                  "exprId": "7231c698-d3d6-b24e-b467-7e4f63ec8b53",
+                  "expr": "VALUE",
+                  "ref": "Organisation.filter(type)",
+                  "groupIdRef": "data-set-group"
+                },
+                {
+                  "exprId": "data-set-group",
+                  "expr": "GROUP",
+                  "exprGroupType": "EXPR"
+                }
+              ],
+              "advancedFiltersEnabled": false
+            }
+          },
+          {
+            "id": "edb6f0df-305e-6819-17ca-9301e7ff6e50",
+            "driverRelation": {
+              "driverSeriesId": "ec9f6e24-da0e-64ec-4933-bd4a5bdcfbed",
+              "semanticRelationshipId": "Organisation.ascendants(Organisation)"
+            },
+            "systemName": "Organisation",
+            "functions": [
+              {
+                "id": "ee16623e-6b55-3b76-7122-b7c10705c3b7",
+                "type": "PROJECTION",
+                "functionId": "Organisation.project(name)",
+                "expanded": false,
+                "emission": {
+                  "sampleSize": 100,
+                  "delimiter": " // "
+                }
+              }
+            ],
+            "filters": [
+              {
+                "filterId": "Organisation.filter(type)",
+                "groupRef": "data-set-group",
+                "selectMany": {
+                  "limitationType": "MATCH",
+                  "mode": "ELIMINATE_ROWS",
+                  "values": [
+                    "/dk/atira/pure/organisation/organisationtypes/organisation/003"
+                  ],
+                  "variant": "standard"
+                }
+              }
+            ],
+            "filterExpression": {
+              "version": 2,
+              "expression": [
+                {
+                  "exprId": "bfcb7212-13b6-b4ad-e9d8-233aee109132",
+                  "expr": "VALUE",
+                  "ref": "Organisation.filter(type)",
+                  "groupIdRef": "data-set-group"
+                },
+                {
+                  "exprId": "data-set-group",
+                  "expr": "GROUP",
+                  "exprGroupType": "EXPR"
+                }
+              ],
+              "advancedFiltersEnabled": false
+            }
+          }
+        ]
+      }
+    ],
+    "dataStory": {
+      "modelType": "dataStoryType",
+      "layout": "list",
+      "grid": {
+        "strategy": "auto",
+        "positions": null
+      },
+      "elements": []
+    }
+  },
+  "idToSave": "282917409"
+}
