@@ -13,7 +13,7 @@ stap 4 pas de filter_media.xls file aan:
 in files staat en bestand met media namen (bronen die uitgesloten worden) en Media titles (titels die uitgesloten worden op basis van bv woorden als call for papers)
 
 stap 5 maak rapport in pure, en maak knipselkrant
-    • gebruik de xml file in files als basis om een raport in pure te maken van personen
+    • gebruik de json file in files als basis om een raport in pure te maken van personen
     • download dit bestand en zet deze in files,  noem deze ‘query.xls’
     * draai nu het script build_nexus_query.py
     • het resultaat is de ‘queries_per_faculteit.txt” (in folder output). deze kun je in de Nexis newsdek als basis gebruiken voor de knipselkrant
