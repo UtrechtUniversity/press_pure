@@ -1,8 +1,10 @@
 """Generate Nexus proximity search queries from a Pure persons export."""
 
 import configparser
-import pandas as pd
+import re
 from pathlib import Path
+
+import pandas as pd
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
@@ -13,7 +15,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 
 def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
     if input_file.suffix.lower() == ".csv":
-        df = pd.read_csv(input_file)
+        df = pd.read_csv(input_file, sep=";", encoding="utf-8-sig")
+        if len(df.columns) == 1:
+            df = pd.read_csv(input_file, sep=",", encoding="utf-8-sig")
     else:
         df = pd.read_excel(input_file, sheet_name=0)
 
@@ -48,8 +52,15 @@ def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
         if pd.isna(org_value):
             return []
         parts = [part.strip() for part in str(org_value).split("//")]
-        faculties = [part for part in parts if part.startswith("Faculteit ")]
-        if not faculties and str(org_value).startswith("Faculteit "):
+        faculties = [
+            part
+            for part in parts
+            if part.startswith("Faculteit ") or re.search(r"\bSchool\b", part)
+        ]
+        if not faculties and (
+            str(org_value).startswith("Faculteit ")
+            or re.search(r"\bSchool\b", str(org_value))
+        ):
             faculties = [str(org_value).strip()]
         return faculties
 
