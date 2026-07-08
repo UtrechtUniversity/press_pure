@@ -182,8 +182,17 @@ def resolve_persons(
 
 # --- Duplicate detection -----------------------------------------------------
 
-def check_duplicates(title: str, persons: List[Tuple[str, Any]], date: datetime) -> bool:
-    """Return True if a matching press clipping already exists in Pure."""
+def check_duplicates(
+    title: str,
+    persons: List[Tuple[str, Any]],
+    date: datetime,
+    medium_type: str = "Web",
+) -> bool:
+    """Return True if a matching press clipping already exists in Pure.
+
+    Radio and TV items are duplicate only on title + person + date. Other media
+    are duplicate on title + person, regardless of date.
+    """
     params = {"q": title.replace("°", ""), "apiKey": API_KEY_OLD}
     headers = {"accept": "application/json", "api-key": API_KEY_OLD}
     try:
@@ -201,16 +210,17 @@ def check_duplicates(title: str, persons: List[Tuple[str, Any]], date: datetime)
         return False
 
     escaped_input = escape_pure_text(title)
+    require_same_date = medium_type in {"Radio", "TV"}
     for item in response.json().get("items", []):
         item_title = (
             item.get("title", {})
             .get("text", [{}])[0]
             .get("value", "")
         )
-        item_period_start = item.get("period", {}).get("startDate", "")
-        if not item_title or not item_period_start:
+        if not item_title:
             logger.debug(f"Skipping duplicate candidate with incomplete fields for '{title}'")
             continue
+        item_period_start = item.get("period", {}).get("startDate", "")
         item_date_str = item_period_start.split("T")[0]
 
         person_ids = set()
@@ -224,7 +234,7 @@ def check_duplicates(title: str, persons: List[Tuple[str, Any]], date: datetime)
 
         if (
             escape_pure_text(item_title) == escaped_input
-            and item_date_str == date.strftime("%Y-%m-%d")
+            and (not require_same_date or item_date_str == date.strftime("%Y-%m-%d"))
             and any(p[0] in person_ids for p in persons)
         ):
             return True

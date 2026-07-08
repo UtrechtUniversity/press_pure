@@ -12,6 +12,7 @@ from email.parser import BytesParser
 from langdetect import detect, DetectorFactory
 from langdetect.lang_detect_exception import LangDetectException
 import configparser
+from media_type import infer_medium_type
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,8 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
         date = parse_date(date_tag.get_text(strip=True)) if date_tag else None
         source_tag = block.find("a", class_="email-article-source-name")
         source = clean_text(source_tag.get_text(strip=True)) if source_tag else "Unknown"
+        feed_tag = block.find_previous("a", class_="email-article-feed")
+        feed = clean_text(feed_tag.get_text(strip=True)) if feed_tag else ""
 
         if source in filtered_sources:
             logger.info(f"Skipped article from filtered source: '{source}' - '{title}'")
@@ -293,6 +296,8 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
                 "URL": url,
                 "Datum": date,
                 "Media name": source,
+                "Nexis feed": feed,
+                "Medium_type": infer_medium_type(title, source, feed) or "Web",
                 "Faculty": faculty,
                 "Person": extract_persons(block),
                 "Keywords": extract_keywords(title),

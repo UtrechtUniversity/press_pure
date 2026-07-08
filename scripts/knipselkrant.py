@@ -63,14 +63,32 @@ def extract_faculty(filename: str) -> str | None:
     return FACULTY_MAP.get(match.group(1).strip(), match.group(1).strip())
 
 
-def deduplicate_articles(articles: list, fields: list) -> list:
+def is_broadcast(article: dict) -> bool:
+    return article.get("Medium_type") in {"Radio", "TV"}
+
+
+def person_ids(article: dict) -> list[str]:
+    return sorted(
+        person_id
+        for person_id, *_ in article.get("Person_resolved", [])
+        if person_id
+    )
+
+
+def deduplicate_articles(articles: list) -> list:
     seen = set()
     unique = []
     for article in articles:
-        key = tuple(article[f] for f in fields)
-        if key not in seen:
-            seen.add(key)
-            unique.append(article)
+        title = article["Media item title"].casefold()
+        date = article["Datum"].strftime("%Y-%m-%d")
+        keys = [
+            (title, person_id, date) if is_broadcast(article) else (title, person_id)
+            for person_id in person_ids(article)
+        ]
+        if any(key in seen for key in keys):
+            continue
+        seen.update(keys)
+        unique.append(article)
     return unique
 
 
@@ -84,7 +102,12 @@ def process_article(article: dict) -> tuple[dict | None, str]:
     if not persons and not article.get("Person"):
         return None, "no_persons"
 
-    if pure_functions.check_duplicates(article["Media item title"], persons, article["Datum"]):
+    if pure_functions.check_duplicates(
+        article["Media item title"],
+        persons,
+        article["Datum"],
+        article.get("Medium_type", "Web"),
+    ):
         return None, "duplicate"
 
     if not persons:
@@ -101,7 +124,7 @@ def process_article(article: dict) -> tuple[dict | None, str]:
         article["typerole"] = "exportcomment"
         article["goodfit"] = "yes"
         article["keywords"] = article["Keywords"]
-        article["Medium_type"] = "Web"
+        article["Medium_type"] = article.get("Medium_type", "Web")
 
     return article, "ok"
 
@@ -149,8 +172,8 @@ def main() -> None:
         f"{counts['no_persons']} no persons, {counts['error']} errors"
     )
 
-    # Deduplicate by title + URL before export
-    processed_articles = deduplicate_articles(processed_articles, ["Media item title", "URL"])
+    # Deduplicate by title + person; radio/tv also requires the same date.
+    processed_articles = deduplicate_articles(processed_articles)
     logger.info(f"{len(processed_articles)} unique articles after deduplication")
 
     # Debug export

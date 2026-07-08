@@ -13,6 +13,22 @@ CONFIG.read(CONFIG_PATH)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
+def _format_name_for_newsdesk(name: str) -> str:
+    """Return names in Newsdesk's preferred first-name last-name order."""
+    if pd.isna(name):
+        return name
+
+    name = str(name).strip()
+    if "," not in name:
+        return name
+
+    last_name, first_names = [part.strip() for part in name.split(",", 1)]
+    if not last_name or not first_names:
+        return name
+
+    return f"{first_names} {last_name}".strip()
+
+
 def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
     if input_file.suffix.lower() == ".csv":
         df = pd.read_csv(input_file, sep=";", encoding="utf-8-sig")
@@ -28,6 +44,7 @@ def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
     ]
     name_col_candidates = [
         "Name variant > Known as name-1",
+        "Known as name",
         "Name",
     ]
 
@@ -46,7 +63,12 @@ def _load_query_dataframe(input_file: Path) -> pd.DataFrame:
         result_df["org_unit"] = result_df["org_unit"].fillna(df["Alle organisational units"])
     result_df["name_variant"] = df[name_col]
     result_df["org_unit"] = result_df["org_unit"].astype("string").str.strip()
-    result_df["name_variant"] = result_df["name_variant"].astype("string").str.strip()
+    result_df["name_variant"] = (
+        result_df["name_variant"]
+        .astype("string")
+        .str.strip()
+        .apply(_format_name_for_newsdesk)
+    )
 
     def extract_faculties(org_value: str) -> list[str]:
         if pd.isna(org_value):

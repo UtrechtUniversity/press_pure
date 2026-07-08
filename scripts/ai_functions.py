@@ -9,6 +9,7 @@ from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 import requests
 from bs4 import BeautifulSoup
+from media_type import infer_medium_type
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
@@ -74,6 +75,7 @@ def ai_getinfo(row):
 
     title = row["Media item title"]
     source = row["Media name"]
+    feed = row.get("Nexis feed", "")
     # person tuple: (employee_id, uuid, original_name, affiliations)
     names = ", ".join(person[2] for person in row['Person_resolved'])
     organizations = ", ".join(org['orgname'] for person in row['Person_resolved'] for org in person[3])
@@ -81,6 +83,7 @@ def ai_getinfo(row):
     prompt = f"""I have an article with the following details:
 - Title: {title}
 - Source: {source}
+- Nexis section: {feed or "unknown"}
 - Researcher: {names}
 - Organisation: {organizations}
 - Content (excerpt): {article_text}
@@ -131,7 +134,10 @@ Return a JSON object with exactly these fields:
     row['typerole'] = rename_typerole(data.get("typerole", "unknown"))
     row['goodfit'] = "yes"
     row['keywords'] = data.get("keywords", [])
-    row['Medium_type'] = data.get("Medium_type", "Web")
+    row['Medium_type'] = infer_medium_type(title, source, feed) or data.get("Medium_type", "Web")
 
-    logger.info(f"AI classified '{title}': role={row['researcher_role']}, type={row['typerole']}")
+    logger.info(
+        f"AI classified '{title}': role={row['researcher_role']}, "
+        f"type={row['typerole']}, medium={row['Medium_type']}"
+    )
     return row
