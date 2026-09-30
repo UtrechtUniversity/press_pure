@@ -75,6 +75,14 @@ def extract_html_from_eml(eml_path):
     else:
         return None
 
+
+def extract_html(file_path: Path):
+    if file_path.suffix.lower() == ".html":
+        with file_path.open("r", encoding="utf-8") as f:
+            return BeautifulSoup(f.read(), "html.parser")
+    return extract_html_from_eml(file_path)
+
+
 def clean_text(text: str) -> str:
     """Remove newlines, pipes, and extra spaces from text."""
     return " ".join(text.replace("\n", " ").replace("|", "").split()).strip()
@@ -82,12 +90,14 @@ def clean_text(text: str) -> str:
 
 def parse_date(date_str: str) -> datetime | None:
     """Parse a date string, handling variations and returning a datetime object."""
-    try:
-        cleaned_date = clean_text(date_str)
-        return datetime.strptime(cleaned_date, "%d %b %Y %H:%M")
-    except ValueError as e:
-        logger.warning(f"Failed to parse date '{date_str}': {e}")
-        return None
+    cleaned_date = clean_text(date_str)
+    for date_format in ("%d %b %Y %H:%M", "%b %d, %Y %I:%M:%S %p"):
+        try:
+            return datetime.strptime(cleaned_date, date_format)
+        except ValueError:
+            continue
+    logger.warning(f"Failed to parse date '{date_str}'")
+    return None
 
 def extract_faculties(soup: BeautifulSoup) -> list[str]:
     """Identify faculty names from an article block."""
@@ -240,12 +250,10 @@ def rename_mediatype(mediatype):
 def process_html_file(file_path: Path, faculty) -> list[dict]:
     """Parse an HTML file and extract article metadata."""
 
-    soup = extract_html_from_eml(file_path)
+    soup = extract_html(file_path)
     if soup is None:
-        logger.warning(f"No HTML body found in email: {file_path.name}")
+        logger.warning(f"No HTML content found in file: {file_path.name}")
         return []
-    # with file_path.open("r", encoding="utf-8") as f:
-    #     soup = BeautifulSoup(f.read(), "html.parser")
 
     if FILTER_FILE.exists():
         filtered_sources = set(pd.read_excel(FILTER_FILE, sheet_name="Media name").iloc[:, 0].dropna().str.strip())
@@ -256,8 +264,12 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
         logger.warning(f"Filter file not found: {FILTER_FILE}. No sources will be filtered.")
 
     articles = []
-    for block in soup.find_all("tr", class_="article_container"):
+    article_blocks = soup.find_all("tr", class_="article_container") or soup.find_all(class_="exported-article")
+    for block in article_blocks:
         title_tag = block.find("a", class_="email-article-headline")
+        if not title_tag:
+            headline = block.find(class_="headline")
+            title_tag = headline.find("a") if headline else None
         if not title_tag:
             continue
 
@@ -276,8 +288,12 @@ def process_html_file(file_path: Path, faculty) -> list[dict]:
             continue
         url = title_tag.get("href", "")[:1024]
         date_tag = block.find("span", class_="article-email-harvest-date")
+        if not date_tag:
+            date_tag = block.find(class_="harvest-date")
         date = parse_date(date_tag.get_text(strip=True)) if date_tag else None
         source_tag = block.find("a", class_="email-article-source-name")
+        if not source_tag:
+            source_tag = block.find("a", class_="source")
         source = clean_text(source_tag.get_text(strip=True)) if source_tag else "Unknown"
         feed_tag = block.find_previous("a", class_="email-article-feed")
         feed = clean_text(feed_tag.get_text(strip=True)) if feed_tag else ""

@@ -19,6 +19,7 @@ import pdf_archiver
 import pure_functions
 import url_resolver
 import xml_builder
+from clipping_config import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +93,12 @@ def deduplicate_articles(articles: list) -> list:
     return unique
 
 
-def process_article(article: dict) -> tuple[dict | None, str]:
+def process_article(article: dict, settings=None) -> tuple[dict | None, str]:
     """Resolve persons, check duplicates, and enrich a single article.
 
     Returns (article, status) where status is 'ok', 'duplicate', or 'no_persons'.
     """
+    settings = settings or load_settings()
     persons, _ = pure_functions.resolve_persons(article["Person"], article["Datum"])
 
     if not persons and not article.get("Person"):
@@ -116,11 +118,11 @@ def process_article(article: dict) -> tuple[dict | None, str]:
     article["Person_resolved"] = persons
 
     if AI:
-        article = ai_functions.ai_getinfo(article)
+        article = ai_functions.ai_getinfo(article, settings=settings)
     else:
         article["article_degree"] = "national"
-        article["researcher_role"] = "interviewee"
-        article["media_type"] = "Contribution"
+        article["researcher_role"] = settings.default_role
+        settings.normalize_article(article)
         article["typerole"] = "exportcomment"
         article["goodfit"] = "yes"
         article["keywords"] = article["Keywords"]
@@ -131,16 +133,22 @@ def process_article(article: dict) -> tuple[dict | None, str]:
 
 def main() -> None:
     setup_logging()
+    settings = load_settings()
     OUTPUT_DIR.mkdir(exist_ok=True)
     logger.info("Press clipping processing started.")
 
-    # --- Phase 1: Parse .eml files -------------------------------------------
+    # --- Phase 1: Parse .eml/.html files -------------------------------------
     t = time.time()
     all_articles = []
-    for eml_file in INPUT_DIR.rglob("*.eml"):
-        logger.info(f"Parsing: {eml_file.name}")
-        faculty = extract_faculty(eml_file.name)
-        all_articles.extend(parsing_functions.process_html_file(eml_file, faculty))
+    input_files = sorted(
+        path
+        for pattern in ("*.eml", "*.html")
+        for path in INPUT_DIR.rglob(pattern)
+    )
+    for input_file in input_files:
+        logger.info(f"Parsing: {input_file.name}")
+        faculty = extract_faculty(input_file.name)
+        all_articles.extend(parsing_functions.process_html_file(input_file, faculty))
     logger.info(f"Parsed {len(all_articles)} articles in {time.time()-t:.1f}s")
 
     # --- Phase 2: Resolve URLs -----------------------------------------------
@@ -154,7 +162,7 @@ def main() -> None:
     counts = {"ok": 0, "duplicate": 0, "no_persons": 0, "error": 0}
 
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(process_article, article): article for article in all_articles}
+        futures = {executor.submit(process_article, article, settings): article for article in all_articles}
         for future in as_completed(futures):
             try:
                 result, status = future.result()
@@ -189,13 +197,13 @@ def main() -> None:
 
     # --- Phase 5: Build XML + upload -----------------------------------------
     t = time.time()
-    xml_content = xml_builder.build_xml(processed_articles)
+    xml_content = xml_builder.build_xml(processed_articles, settings=settings)
     output_file = OUTPUT_DIR / f"press_clippings_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xml"
     output_file.write_text(xml_content, encoding="utf-8")
     logger.info(f"XML written to {output_file}")
 
     pure_functions.upload_processed_articles(
-        processed_articles, api_key=APIKEY_CRUD, api_url_base=BASEURL_CRUD
+        processed_articles, api_key=APIKEY_CRUD, api_url_base=BASEURL_CRUD, settings=settings
     )
     logger.info(f"Upload phase done in {time.time()-t:.1f}s")
     logger.info("Pipeline complete.")

@@ -10,18 +10,48 @@ from requests.adapters import HTTPAdapter
 import requests
 from bs4 import BeautifulSoup
 from media_type import infer_medium_type
+from clipping_config import load_settings
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
 CONFIG.read(CONFIG_PATH)
 CONFIG.read('config.cfg')
-OPENAI_API = CONFIG['CREDENTIALS']['OPENAI_API']
 
-MODEL = "gpt-4o-mini"
+AI_PROVIDER = CONFIG.get("AI", "PROVIDER", fallback="openai").strip().lower()
+DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "mistral": "mistral-small-latest",
+}
+MODEL = CONFIG.get("AI", "MODEL", fallback=DEFAULT_MODELS.get(AI_PROVIDER, "gpt-4o-mini")).strip()
 MAX_ARTICLE_CHARS = 2000  # Limit article body before building the prompt
 
-# Client once at module level — not per article
-_client = OpenAI(api_key=OPENAI_API)
+
+def make_ai_client() -> OpenAI:
+    """Create an OpenAI-compatible client for the configured AI provider."""
+    if AI_PROVIDER == "mistral":
+        api_key = CONFIG.get("CREDENTIALS", "MISTRAL_API", fallback="").strip()
+        if not api_key:
+            raise ValueError("MISTRAL_API is required when [AI] PROVIDER = mistral")
+        return OpenAI(api_key=api_key, base_url="https://api.mistral.ai/v1")
+
+    if AI_PROVIDER == "openai":
+        api_key = CONFIG.get("CREDENTIALS", "OPENAI_API", fallback="").strip()
+        if not api_key:
+            raise ValueError("OPENAI_API is required when [AI] PROVIDER = openai")
+        return OpenAI(api_key=api_key)
+
+    raise ValueError(f"Unsupported AI provider '{AI_PROVIDER}'. Use 'openai' or 'mistral'.")
+
+
+_client = None
+
+
+def get_ai_client() -> OpenAI:
+    """Return a cached OpenAI-compatible client."""
+    global _client
+    if _client is None:
+        _client = make_ai_client()
+    return _client
 
 
 def fetch_article_text(url, fallback_title):
@@ -63,7 +93,8 @@ def rename_typerole(typerole):
     return typerole
 
 
-def ai_getinfo(row):
+def ai_getinfo(row, settings=None):
+    settings = settings or load_settings()
     url = row['URL']
     if url:
         article_text = fetch_article_text(url, row['Media item title'])
@@ -92,16 +123,16 @@ Return a JSON object with exactly these fields:
 
 1. "keywords": list of 4 relevant keywords (max 2 words each)
 2. "degree": one of "local", "national", "international" (English article → international)
-3. "researcher_role": one of "research cited", "interviewee", "participant", "author"
-   - interviewee: quoted as only person
-   - author: ONLY if clearly stated
-   - participant: default when in doubt
+3. "researcher_role": one of {json.dumps(list(settings.roles))}
+   Role labels: {json.dumps({key: role.label for key, role in settings.roles.items()})}
+   Use {json.dumps(settings.default_role)} when in doubt.
+   Select author only if authorship is clearly stated; interviewee means interviewed or quoted.
 4. "typerole": one of "expert comment", "research", "public engagement activity"
 5. "Medium_type": one of "Radio", "TV", "Web" (use Web if unclear)
 """
 
     try:
-        response = _client.chat.completions.create(
+        response = get_ai_client().chat.completions.create(
             model=MODEL,
             response_format={"type": "json_object"},
             messages=[
@@ -110,26 +141,21 @@ Return a JSON object with exactly these fields:
             ],
         )
         data = json.loads(response.choices[0].message.content)
+        if not isinstance(data, dict):
+            raise ValueError('AI response must be a JSON object')
     except Exception as e:
         logger.warning(f"AI call failed for '{title}': {e}")
         data = {
             "keywords": [],
             "degree": "national",
-            "researcher_role": "participant",
+            "researcher_role": settings.default_role,
             "typerole": "unknown",
             "Medium_type": "Web",
         }
 
     row['article_degree'] = data.get("degree", "national")
-    row['researcher_role'] = data.get("researcher_role", "participant")
-
-    if row['researcher_role'] in ("research cited", "researchcited"):
-        row['researcher_role'] = 'researchcited'
-        row['media_type'] = "Coverage"
-    else:
-        if row['researcher_role'] not in ("author", "interviewee"):
-            row['researcher_role'] = 'participant'
-        row['media_type'] = "Contribution"
+    row['researcher_role'] = data.get('researcher_role') if len(settings.roles) > 1 else settings.default_role
+    settings.normalize_article(row)
 
     row['typerole'] = rename_typerole(data.get("typerole", "unknown"))
     row['goodfit'] = "yes"
