@@ -7,6 +7,7 @@ from xml.dom import minidom
 from typing import List, Dict, Any
 from datetime import datetime
 from pathlib import Path
+from clipping_config import load_settings
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / 'config.cfg'
 CONFIG = configparser.ConfigParser()
@@ -20,8 +21,11 @@ def make_header() -> ET.Element:
     """Create the root XML element for Pure clippings."""
     return ET.Element(f"{{{NAMESPACE}}}clippings")
 
-def make_single_clipping(root: ET.Element, article: Dict[str, Any], press_id: str) -> None:
+def make_single_clipping(root: ET.Element, article: Dict[str, Any], press_id: str, settings=None) -> None:
     """Add a single clipping element to the XML root."""
+    settings = settings or load_settings()
+    article = dict(article)
+    role = settings.normalize_article(article)
     clipping = ET.SubElement(root, f"{{{NAMESPACE}}}clipping", {
         "id": press_id,
         "type": article['typerole'] ,
@@ -75,7 +79,7 @@ def make_single_clipping(root: ET.Element, article: Dict[str, Any], press_id: st
             "lookupHint": "personSync",
             "origin": "internal"
         })
-        ET.SubElement(person, f"{{{NAMESPACE}}}role").text = article["researcher_role"] # Adjust as needed
+        ET.SubElement(person, f"{{{NAMESPACE}}}role").text = role.uri.rsplit('/', 1)[-1]
 
         orgs_elem = ET.SubElement(person, f"{{{NAMESPACE}}}organisations")
         for org in orgs:
@@ -109,11 +113,13 @@ def remove_duplicates(root: ET.Element) -> ET.Element:
     return root
 
 
-def build_xml(articles: List[Dict[str, Any]]) -> str:
+def build_xml(articles: List[Dict[str, Any]], settings=None) -> str:
     """Build a complete XML string from a list of articles."""
+    if articles:
+        settings = settings or load_settings()
     root = make_header()
     for i, article in enumerate(articles):
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        make_single_clipping(root, article, f"Knipselkrant-{i}-{timestamp}")
+        make_single_clipping(root, article, f"Knipselkrant-{i}-{timestamp}", settings=settings)
     root = remove_duplicates(root)
     return minidom.parseString(ET.tostring(root, "utf-8")).toprettyxml(indent="   ")

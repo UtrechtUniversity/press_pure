@@ -13,6 +13,7 @@ from rapidfuzz import fuzz
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from pathlib import Path
+from clipping_config import load_settings, validate_vocabularies
 
 logger = logging.getLogger(__name__)
 
@@ -54,10 +55,10 @@ def escape_pure_text(text: str, wrap_paragraph: bool = False) -> str:
     return f"<p>{escaped}</p>" if wrap_paragraph else escaped
 
 
-def make_free_keywords_group(keywords: list[str]) -> dict:
+def make_free_keywords_group(keywords: list[str], logical_name: str = 'keywordContainers') -> dict:
     return {
         "typeDiscriminator": "FreeKeywordsKeywordGroup",
-        "logicalName": "keywordContainers",
+        "logicalName": logical_name,
         "name": {"en_GB": "Keywords"},
         "keywords": [{"locale": "en_GB", "freeKeywords": keywords}],
     }
@@ -193,63 +194,64 @@ def check_duplicates(
     Radio and TV items are duplicate only on title + person + date. Other media
     are duplicate on title + person, regardless of date.
     """
-    params = {"q": title.replace("°", ""), "apiKey": API_KEY_OLD}
-    headers = {"accept": "application/json", "api-key": API_KEY_OLD}
+    payload = {"searchString": title.replace("°", ""), "size": 100}
+    headers = {"accept": "application/json", "Content-Type": "application/json", "api-key": APIKEY_CRUD}
     try:
-        response = SESSION.get(
-            f"{BASEURL}press-media",
-            params=params,
+        response = SESSION.post(
+            f"{BASEURL_CRUD.rstrip('/')}/pressmedia/search",
+            json=payload,
             headers=headers,
             timeout=UPLOAD_TIMEOUT,
         )
     except requests.RequestException as e:
         logger.warning(f"Duplicate check request failed for '{title}': {e}")
-        return False
+        raise
 
     if response.status_code != 200:
-        return False
+        raise RuntimeError(
+            f"Duplicate check failed for '{title}' "
+            f"with status {response.status_code}: {response.text[:300]}"
+        )
 
     escaped_input = escape_pure_text(title)
     require_same_date = medium_type in {"Radio", "TV"}
+    target_person_ids = {p[0] for p in persons if len(p) > 0 and p[0]}
+    target_person_uuids = {p[1] for p in persons if len(p) > 1 and p[1]}
+
     for item in response.json().get("items", []):
-        item_title = (
-            item.get("title", {})
-            .get("text", [{}])[0]
-            .get("value", "")
-        )
+        item_title = item.get("title", {}).get("en_GB", "")
         if not item_title:
             logger.debug(f"Skipping duplicate candidate with incomplete fields for '{title}'")
             continue
-        item_period_start = item.get("period", {}).get("startDate", "")
-        item_date_str = item_period_start.split("T")[0]
 
-        person_ids = set()
-        for assoc in item.get("personAssociations", []):
-            if "person" not in assoc:
-                logger.warning(f"Missing 'person' key in association for '{title}': {assoc}")
+        if escape_pure_text(item_title) != escaped_input:
+            continue
+
+        for coverage in item.get("mediaCoverages", []):
+            coverage_title = coverage.get("title", {}).get("en_GB", item_title)
+            if escape_pure_text(coverage_title) != escaped_input:
                 continue
-            for _id in (assoc["person"].get("externalId"), assoc["person"].get("internalId")):
-                if _id:
-                    person_ids.add(_id)
 
-        if (
-            escape_pure_text(item_title) == escaped_input
-            and (not require_same_date or item_date_str == date.strftime("%Y-%m-%d"))
-            and any(p[0] in person_ids for p in persons)
-        ):
-            return True
+            coverage_date = str(coverage.get("date", "")).split("T")[0]
+            if require_same_date and coverage_date != date.strftime("%Y-%m-%d"):
+                continue
+
+            coverage_person_ids = set()
+            coverage_person_uuids = set()
+            for assoc in coverage.get("persons", []):
+                person = assoc.get("person", {})
+                if person.get("uuid"):
+                    coverage_person_uuids.add(person["uuid"])
+                for _id in (person.get("externalId"), person.get("internalId")):
+                    if _id:
+                        coverage_person_ids.add(_id)
+
+            if target_person_ids & coverage_person_ids or target_person_uuids & coverage_person_uuids:
+                return True
 
     return False
 
 # --- Payload building --------------------------------------------------------
-
-CLASSIFICATION_GROUP = {
-    "typeDiscriminator": "ClassificationsKeywordGroup",
-    "logicalName": "/dk/atira/pure/clippings/keywords/imported",
-    "name": {"en_GB": "Imported by media import tool"},
-    "classifications": [{"uri": "/dk/atira/pure/clippings/keywords/imported/true", "term": {"en_GB": "true"}}],
-}
-
 
 def build_workflow(faculty: str) -> dict:
     """Return a Pure workflow dict based on faculty config."""
@@ -258,8 +260,11 @@ def build_workflow(faculty: str) -> dict:
     return {"step": status, "description": {"en_GB": status}}
 
 
-def build_payload_from_row(row: dict) -> dict:
+def build_payload_from_row(row: dict, settings=None) -> dict:
     """Construct the Pure press media JSON payload from a processed article row."""
+    settings = settings or load_settings()
+    row = dict(row)
+    role = settings.normalize_article(row)
     title = html.escape(row["Media item title"])
     url = row["URL"]
     date = row["Datum"].strftime("%Y-%m-%d") if isinstance(row["Datum"], datetime) else str(row["Datum"])
@@ -268,8 +273,6 @@ def build_payload_from_row(row: dict) -> dict:
     media_type = row["media_type"].upper()
     typerole = row.get("typerole", "exportcomment")
     degree = row.get("article_degree", "national")
-    role_term = row.get("researcher_role", "interviewee")
-    role_uri = f"/dk/atira/pure/clipping/roles/clipping/{role_term.lower()}"
     country = LANGUAGE_TO_COUNTRY.get(row.get("Language"))
     keywords = [kw.strip() for kw in row.get("keywords", []) if kw.strip()]
 
@@ -304,7 +307,7 @@ def build_payload_from_row(row: dict) -> dict:
         coverage_persons.append({
             "typeDiscriminator": "InternalPressMediaPersonAssociation",
             "name": {"firstName": first_name, "lastName": last_name},
-            "role": {"uri": role_uri, "term": {"en_GB": role_term.capitalize()}},
+            "role": {"uri": role.uri, "term": {"en_GB": role.label}},
             "person": {"systemName": "Person", "uuid": person_uuid},
             "organizations": org_list,
         })
@@ -343,8 +346,15 @@ def build_payload_from_row(row: dict) -> dict:
             "organizations": [{"uuid": u, "systemName": s} for u, s in org_set],
         }],
         "workflow": build_workflow(row["Faculty"]),
-        "keywordGroups": [CLASSIFICATION_GROUP] + ([make_free_keywords_group(keywords)] if keywords else []),
     }
+    groups = []
+    marker = settings.marker_group()
+    if marker:
+        groups.append(marker)
+    if keywords:
+        groups.append(make_free_keywords_group(keywords, settings.free_keywords_group))
+    if groups:
+        payload['keywordGroups'] = groups
     if country:
         payload["mediaCoverages"][0]["country"] = {"uri": f"/dk/atira/pure/core/countries/{country}"}
 
@@ -356,8 +366,13 @@ def build_payload_from_row(row: dict) -> dict:
 
 # --- Upload ------------------------------------------------------------------
 
-def upload_processed_articles(processed_articles: list, api_key: str, api_url_base: str) -> None:
+def upload_processed_articles(processed_articles: list, api_key: str, api_url_base: str, settings=None) -> None:
     """PUT each processed article to the Pure press media endpoint."""
+    if not processed_articles:
+        return
+    settings = settings or load_settings()
+    validate_vocabularies(settings, SESSION, api_url_base, api_key,
+                          uses_free_keywords=any(row.get('keywords') for row in processed_articles))
     json_headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -365,10 +380,10 @@ def upload_processed_articles(processed_articles: list, api_key: str, api_url_ba
     }
     success, fail = 0, 0
     for row in processed_articles:
-        payload = build_payload_from_row(row)
+        payload = build_payload_from_row(row, settings=settings)
         try:
             response = SESSION.put(
-                f"{api_url_base}/pressmedia",
+                f"{api_url_base.rstrip('/')}/pressmedia",
                 headers=json_headers,
                 data=json.dumps(payload),
                 timeout=UPLOAD_TIMEOUT,
