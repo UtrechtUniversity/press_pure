@@ -30,9 +30,21 @@ system libraries; see the root README for setup details.
 
 Copy `configdummy.cfg` to `config.cfg` for a new installation. For an existing
 installation, merge settings into the existing config to preserve credentials.
-Set `APIKEY`, `APIKEY_CRUD`, `BASEURL`, and `BASEURL_CRUD` for your own Pure
-installation; both URLs need trailing slashes. Review `[NAME]`, `[FILTERS]`,
+Set `APIKEY_CRUD` and `BASEURL_CRUD` for your own Pure installation, with a trailing
+slash on the URL. Keep the legacy `APIKEY` and `BASEURL` entries because the code
+still reads them at startup; the current import pipeline uses the CRUD settings.
+Review `[NAME]`, `[FILTERS]`,
 `[SOURCE_MAP]`, and `[WORKFLOW STATUS]` for your institution.
+
+Ask your Pure administrator to grant the API key and its associated user
+**read access to persons and organisations**, and **read and write access to
+press/media** for the relevant organisations and workflow statuses. The key must
+allow the search, organisation lookup, vocabulary, and press/media upload
+endpoints. Field filters must expose names, Employee IDs and affiliations for
+matching, and existing press/media for duplicate checks. Use the
+[complete API permissions checklist](../../README.md#required-pure-api-permissions)
+when requesting access. Vocabulary validation alone does not verify write access;
+verify that with a small staging import.
 
 Under `[AI]`, set `AI = false` to disable AI. Otherwise configure `PROVIDER`,
 `MODEL`, and the matching `OPENAI_API` or `MISTRAL_API` credential. The template

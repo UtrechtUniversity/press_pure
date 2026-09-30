@@ -5,8 +5,7 @@ clippings, match researchers, optionally enrich metadata with AI, and upload the
 results to Pure. Each import also produces an XML export and logs.
 
 This README is the technical reference for the code in this checkout. The
-[illustrated workflow](docs/press_pure_README/README.md) and
-[Word manual](docs/Handleiding_Github_EN.docx) explain the newsletter setup.
+[illustrated workflow](docs/press_pure_README/README.md) explains the newsletter setup.
 Keep these guides and `configdummy.cfg` aligned when changing the workflow.
 
 ## Installation
@@ -44,9 +43,11 @@ For a new installation, copy `configdummy.cfg` to `config.cfg`, then edit the
 copy. For an existing installation, merge the required settings into your
 current config without replacing its credentials. `config.cfg` is ignored by Git.
 
-- Under `[CREDENTIALS]`, set both `APIKEY` and `APIKEY_CRUD`, plus `BASEURL`
-  (the versioned API) and `BASEURL_CRUD` (the CRUD API). Use your installation's
-  endpoints with trailing slashes; the template's Utrecht URLs are examples.
+- Under `[CREDENTIALS]`, set `APIKEY_CRUD` and `BASEURL_CRUD` for your Pure
+  installation, with a trailing slash on the URL. Keep the legacy `APIKEY` and
+  `BASEURL` entries: the code still reads them at startup, although the current
+  import pipeline uses the CRUD key and URL for its Pure requests. The template's
+  Utrecht URLs are examples. Configure the API access described below.
 - Set `[NAME]` to your institution's Dutch and English names. Review `[FILTERS]`,
   `[SOURCE_MAP]`, and `[WORKFLOW STATUS]` for your institution. The filename-to-faculty
   map in `scripts/knipselkrant.py` also contains Utrecht-specific defaults.
@@ -62,6 +63,59 @@ sheet lists exact source names in the first column; its `Media title` sheet list
 title substrings in the first column. Matching is case-sensitive. If the workbook
 is missing, the importer warns and continues without these exclusions.
 
+### Required Pure API permissions
+
+Ask your Pure administrator to configure `APIKEY_CRUD` for the target environment.
+Endpoint access, the associated user's privileges, and the access definition's
+content and field permissions all matter. Enabling an endpoint alone does not
+grant access to every record or permission to write it. See Pure's documentation
+on [API keys](https://butler.elsevierpure.com/ws/api/documentation/user-guide/api-keys.html)
+and [authorization](https://tourolaw.elsevierpure.com/ws/api/documentation/user-guide/authorization.html).
+
+The following requirements come from the current import pipeline. Paths are
+relative to `BASEURL_CRUD`; requests authenticate with the `api-key` header.
+
+| Method and endpoint | Required access and purpose |
+| --- | --- |
+| `POST /persons/search` | Read/search persons for researcher matching. This POST is a search, not a person write. |
+| `GET /organizations/{uuid}` | Read organisations for affiliations and the managing organisation. |
+| `POST /pressmedia/search` | Read/search existing press/media records for duplicate detection. This POST is also read-only. |
+| `GET /pressmedia/allowed-media-coverages-persons-roles` | Read allowed person roles; required before each nonempty upload batch. |
+| `GET /pressmedia/allowed-keyword-group-configurations` | Read keyword groups when free keywords or the imported marker are used. |
+| `GET /pressmedia/allowed-keyword-group-configurations/{pureId}/classifications` | Read classifications when the imported marker is enabled. |
+| `PUT /pressmedia` | Create press/media records with the configured content and workflow status. |
+
+Configure **read access for persons and organisations**, and **read and write
+access for press/media**, including the fields used by the importer. The Pure
+user attached to the key must be able to create press/media for the relevant
+organisations and use the configured workflow statuses. Have the administrator
+check the role names in your installation; this project does not prescribe a
+universal Pure administrator role. Person/organisation writes and deletion are
+not used by this pipeline.
+
+Field and content access must include:
+
+- Persons: UUID, name and name variants, identifiers (including `Employee ID`),
+  and staff organisation associations with their periods and organisation UUIDs.
+- Organisations: UUID, type, and name, including the `en_GB` values read by the code.
+- Existing press/media: titles and media coverages, including linked person
+  identifiers/UUIDs and dates, for duplicate detection. Content filters must
+  include the existing records against which imports should be checked.
+- New press/media: title, type, visibility, descriptions, managing organisation,
+  workflow, and media coverages with their metadata, person roles and organisation
+  links; keyword groups and country when included in the payload.
+
+The optional `get_media_item()` helper additionally uses
+`GET /pressmedia/{uuid}`; it is not called by the normal import pipeline.
+Generating queries from a saved person export makes no Pure API requests.
+Creating/exporting the person report in Pure requires the operator's own reporting
+access separately from the import API key.
+
+Validate read/search access and vocabulary responses in the target environment,
+then check write access with a small staging import. The application's vocabulary
+preflight does not verify every user privilege or writable field, so a successful
+preflight alone does not establish that uploads will succeed.
+
 ## Directory structure
 
 ```text
@@ -74,7 +128,7 @@ press_pure/
 ├── output/                   # Queries, XML exports, optional PDF archive
 ├── logs/                     # Run logs and processed_articles.xlsx
 ├── tests/                    # Offline regression tests
-├── docs/                     # Illustrated guide and Word manual
+├── docs/                     # Illustrated guide and screenshots
 ├── configdummy.cfg           # Configuration template
 └── config.cfg                # Local configuration and credentials
 ```
